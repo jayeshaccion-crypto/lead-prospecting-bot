@@ -1,0 +1,65 @@
+name: Lead Prospecting Pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    environment: deploy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install scrapling[all]
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      - name: Restore database from R2
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/leads.db data/leads.db \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto
+
+      - name: Run pipeline
+        run: python run.py
+        env:
+          DB_PATH: data/leads.db
+
+      - name: Upload database to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp data/leads.db s3://${{ secrets.R2_BUCKET_NAME }}/leads.db \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto
+
+      - name: Build dashboard
+        run: python build_dashboard.py
+        env:
+          DB_PATH: data/leads.db
+
+      - name: Deploy dashboard to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install -g wrangler
+          wrangler pages project create lead-dashboard --production-branch main || true
+          wrangler pages deploy dashboard.html --project-name=lead-dashboard --branch main

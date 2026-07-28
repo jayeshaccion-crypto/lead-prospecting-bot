@@ -1,0 +1,230 @@
+"""Generate a standalone HTML dashboard from the lead database."""
+import sqlite3, json
+from pathlib import Path
+from datetime import datetime
+
+DB = Path("data") / "leads.db"
+OUT = Path("dashboard.html")
+
+
+def build():
+    if not DB.exists():
+        print(f"Database not found at {DB} — nothing to build")
+        return 0
+    conn = sqlite3.connect(str(DB))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    cur.execute("SELECT company_name, website, email, phone, address, industry_code, lead_score, dedup_key FROM Leads ORDER BY COALESCE(lead_score, '0') DESC, company_name")
+    rows = []
+    for r in cur.fetchall():
+        d = dict(r)
+        if d.get("lead_score"):
+            try: d["lead_score"] = int(d["lead_score"])
+            except: pass
+        rows.append(d)
+
+    total = len(rows)
+    phones = sum(1 for r in rows if r.get("phone"))
+    emails = sum(1 for r in rows if r.get("email"))
+    websites = sum(1 for r in rows if r.get("website"))
+    domains = sum(1 for r in rows if r.get("dedup_key"))
+    scores = [r["lead_score"] for r in rows if isinstance(r.get("lead_score"), int)]
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+
+    conn.close()
+
+    data_json = json.dumps(rows)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lead Prospecting Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: #f0f4f8; color: #1a2332;
+  padding: 32px 24px; line-height: 1.5;
+}}
+.header {{
+  max-width:1280px; margin:0 auto 32px;
+  display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px;
+}}
+.header h1 {{
+  font-size:28px; font-weight:700;
+  background:linear-gradient(135deg,#1a2332,#3b82f6);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}}
+.header .sub {{ color:#64748b; font-size:14px; margin-top:4px; }}
+.header .badge {{
+  background:#fff; border-radius:100px; padding:8px 20px;
+  font-size:13px; font-weight:600; color:#1a2332;
+  box-shadow:0 1px 3px rgba(0,0,0,.08);
+  display:inline-flex; align-items:center; gap:8px;
+}}
+.header .badge span {{ color:#3b82f6; font-size:18px; }}
+.cards {{
+  max-width:1280px; margin:0 auto;
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  gap:16px; margin-bottom:28px;
+}}
+.card {{
+  background:#fff; border-radius:14px; padding:20px 24px;
+  box-shadow:0 1px 3px rgba(0,0,0,.06);
+  transition:transform .15s,box-shadow .15s;
+}}
+.card:hover {{ transform:translateY(-2px); box-shadow:0 8px 25px rgba(0,0,0,.08); }}
+.card .lbl {{ font-size:11px; font-weight:600; color:#94a3b8; text-transform:uppercase; letter-spacing:.5px; }}
+.card .val {{ font-size:28px; font-weight:700; margin-top:6px; }}
+.val.blue {{ color:#3b82f6; }} .val.gold {{ color:#f59e0b; }}
+.val.green {{ color:#10b981; }} .val.purple {{ color:#8b5cf6; }}
+.val.red {{ color:#ef4444; }} .val.teal {{ color:#06b6d4; }}
+.controls {{
+  max-width:1280px; margin:0 auto 16px;
+  display:flex; gap:12px; flex-wrap:wrap; align-items:center;
+}}
+.controls input,.controls select {{
+  padding:10px 16px; border:1px solid #e2e8f0; border-radius:8px;
+  font-size:14px; font-family:inherit; background:#fff;
+  outline:none; transition:border-color .15s;
+}}
+.controls input:focus,.controls select:focus {{ border-color:#3b82f6; }}
+.controls input {{ flex:1 1 260px; }}
+.controls select {{ width:160px; }}
+.controls .cnt {{ font-size:13px; color:#64748b; margin-left:auto; }}
+.wrap {{
+  max-width:1280px; margin:0 auto;
+  background:#fff; border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,.06);
+  overflow-x:auto;
+}}
+table {{ width:100%; border-collapse:collapse; font-size:13px; min-width:900px; }}
+thead {{ background:#f8fafc; }}
+th {{
+  text-align:left; padding:14px 16px; font-weight:600; font-size:11px;
+  color:#64748b; text-transform:uppercase; letter-spacing:.5px;
+  border-bottom:1px solid #e2e8f0; white-space:nowrap; cursor:pointer;
+  user-select:none; position:sticky; top:0; background:#f8fafc;
+}}
+th:hover {{ color:#3b82f6; }}
+td {{ padding:12px 16px; border-bottom:1px solid #f1f5f9; }}
+tr:hover td {{ background:#f8fafc; }}
+.empt {{ color:#94a3b8; font-style:italic; }}
+.scr {{
+  display:inline-block; min-width:32px; text-align:center;
+  padding:2px 8px; border-radius:6px; font-weight:700; font-size:12px;
+}}
+.scr.high {{ background:#d1fae5; color:#065f46; }}
+.scr.med {{ background:#fef3c7; color:#92400e; }}
+.scr.low {{ background:#fee2e2; color:#991b1b; }}
+.scr.nil {{ background:#f1f5f9; color:#94a3b8; }}
+.tel {{ font-variant-numeric:tabular-nums; }}
+.adr {{ color:#475569; max-width:220px; }}
+.ind {{ color:#64748b; max-width:180px; }}
+.foot {{ max-width:1280px; margin:20px auto 0; text-align:center; font-size:12px; color:#94a3b8; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Lead Prospecting Dashboard</h1>
+    <div class="sub">Live data from Justdial, IndiaMART &amp; TradeIndia</div>
+  </div>
+  <div class="badge"><span>&#9679;</span> {datetime.now().strftime("%b %d, %Y at %I:%M %p")}</div>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="lbl">Total Leads</div><div class="val blue">{total}</div></div>
+  <div class="card"><div class="lbl">Avg Score</div><div class="val gold">{avg_score}</div></div>
+  <div class="card"><div class="lbl">With Phone</div><div class="val green">{phones}</div></div>
+  <div class="card"><div class="lbl">With Email</div><div class="val purple">{emails}</div></div>
+  <div class="card"><div class="lbl">With Website</div><div class="val red">{websites}</div></div>
+  <div class="card"><div class="lbl">With Dedup Key</div><div class="val teal">{domains}</div></div>
+</div>
+
+<div class="controls">
+  <input type="text" id="q" placeholder="Search company, phone, address..." oninput="draw()">
+  <select id="sf" onchange="draw()">
+    <option value="">All Scores</option>
+    <option value="high">High (60-100)</option>
+    <option value="med">Medium (20-59)</option>
+    <option value="low">Low (0-19)</option>
+    <option value="nil">No Score</option>
+  </select>
+  <div class="cnt" id="cnt"></div>
+</div>
+
+<div class="wrap">
+<table>
+<thead><tr>
+  <th onclick="sort(0)">#</th>
+  <th onclick="sort(1)">Company</th>
+  <th onclick="sort(2)">Phone</th>
+  <th onclick="sort(3)">Email</th>
+  <th onclick="sort(4)">Website</th>
+  <th onclick="sort(5)">Address</th>
+  <th onclick="sort(6)">Industry</th>
+  <th onclick="sort(7)">Score</th>
+  <th onclick="sort(8)">Dedup Key</th>
+</tr></thead>
+<tbody id="tb"></tbody>
+</table>
+</div>
+
+<div class="foot">Lead Prospecting Pipeline &mdash; Built with Scrapling &amp; SQLite</div>
+
+<script>
+const _data = {data_json};
+function _c(v) {{ return (v===null||v===undefined||String(v).trim()==='')?'<span class="empt">\u2014</span>':String(v); }}
+const _f = ['company_name','phone','email','website','address','industry_code','lead_score','dedup_key'];
+let _sc=-1,_sa=true;
+
+function draw() {{
+  const q=document.getElementById('q').value.toLowerCase(), sf=document.getElementById('sf').value;
+  let rows=_data.filter(r=>{{
+    const s=(r.company_name+' '+(r.phone||'')+' '+(r.address||'')+' '+(r.industry_code||'')).toLowerCase();
+    if(q&&!s.includes(q))return false;
+    const sc=r.lead_score;
+    if(sf==='high'&&(sc===null||sc<60))return false;
+    if(sf==='med'&&(sc===null||sc<20||sc>=60))return false;
+    if(sf==='low'&&(sc===null||sc>=20))return false;
+    if(sf==='nil'&&sc!==null)return false;
+    return true;
+  }});
+  if(_sc>=0){{const k=_f[_sc];rows.sort((a,b)=>{{
+    let va=(a[k]===null||a[k]===undefined?'':String(a[k])).toLowerCase();
+    let vb=(b[k]===null||b[k]===undefined?'':String(b[k])).toLowerCase();
+    if(k==='lead_score'){{va=Number(va);vb=Number(vb);}}
+    return va<vb?_sa?-1:1:va>vb?_sa?1:-1:0;
+  }});}}
+  document.getElementById('cnt').textContent='Showing '+rows.length+' of '+_data.length;
+  document.getElementById('tb').innerHTML=rows.map((r,i)=>{{
+    const sc=r.lead_score;
+    const scls=sc===null?'nil':sc>=60?'high':sc>=20?'med':'low';
+    return '<tr><td>'+(i+1)+'</td><td><strong>'+_c(r.company_name)+'</strong></td>'+
+      '<td class="tel">'+_c(r.phone)+'</td><td>'+_c(r.email)+'</td>'+
+      '<td>'+_c(r.website)+'</td><td class="adr">'+_c(r.address)+'</td>'+
+      '<td class="ind">'+_c(r.industry_code).substring(0,120)+'</td>'+
+      '<td><span class="scr '+scls+'">'+(sc===null?'\u2014':sc)+'</span></td>'+
+      '<td>'+_c(r.dedup_key)+'</td></tr>';
+  }}).join('');
+}}
+
+function sort(c){{if(_sc===c)_sa=!_sa;else{{_sc=c;_sa=true;}}draw();}}
+draw();
+</script>
+</body>
+</html>"""
+
+    OUT.write_text(html, encoding="utf-8")
+    print(f"Dashboard written to {OUT.resolve()}")
+    return len(rows)
+
+
+if __name__ == "__main__":
+    build()

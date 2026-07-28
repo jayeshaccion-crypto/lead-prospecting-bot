@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lead Prospecting Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family:'Inter',-apple-system,sans-serif;
+  background:#f0f4f8; color:#1a2332;
+  padding:32px 24px; line-height:1.5;
+}
+.header {
+  max-width:1280px; margin:0 auto 32px;
+  display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px;
+}
+.header h1 {
+  font-size:28px; font-weight:700;
+  background:linear-gradient(135deg,#1a2332,#3b82f6);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}
+.header .sub { color:#64748b; font-size:14px; margin-top:4px; }
+.header .badge {
+  background:#fff; border-radius:100px; padding:8px 20px;
+  font-size:13px; font-weight:600; color:#1a2332;
+  box-shadow:0 1px 3px rgba(0,0,0,.08);
+  display:inline-flex; align-items:center; gap:8px;
+}
+.header .badge span { color:#3b82f6; font-size:18px; }
+.cards {
+  max-width:1280px; margin:0 auto;
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  gap:16px; margin-bottom:28px;
+}
+.card {
+  background:#fff; border-radius:14px; padding:20px 24px;
+  box-shadow:0 1px 3px rgba(0,0,0,.06);
+  transition:transform .15s,box-shadow .15s;
+}
+.card:hover { transform:translateY(-2px); box-shadow:0 8px 25px rgba(0,0,0,.08); }
+.card .lbl { font-size:11px; font-weight:600; color:#94a3b8; text-transform:uppercase; letter-spacing:.5px; }
+.card .val { font-size:28px; font-weight:700; margin-top:6px; }
+.val.blue { color:#3b82f6; } .val.gold { color:#f59e0b; }
+.val.green { color:#10b981; } .val.purple { color:#8b5cf6; }
+.val.red { color:#ef4444; } .val.teal { color:#06b6d4; }
+.controls {
+  max-width:1280px; margin:0 auto 16px;
+  display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+}
+.controls input,.controls select {
+  padding:10px 14px; border:1px solid #e2e8f0; border-radius:8px;
+  font-size:13px; font-family:inherit; background:#fff;
+  outline:none; transition:border-color .15s; color:#1a2332;
+}
+.controls input:focus,.controls select:focus { border-color:#3b82f6; }
+.controls input { flex:1 1 220px; }
+.controls select { width:auto; min-width:130px; }
+.controls .cnt { font-size:13px; color:#64748b; margin-left:auto; white-space:nowrap; }
+.wrap {
+  max-width:1280px; margin:0 auto;
+  background:#fff; border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,.06);
+  overflow-x:auto;
+}
+table { width:100%; border-collapse:collapse; font-size:13px; min-width:1000px; }
+thead { background:#f8fafc; }
+th {
+  text-align:left; padding:14px 14px; font-weight:600; font-size:11px;
+  color:#64748b; text-transform:uppercase; letter-spacing:.5px;
+  border-bottom:1px solid #e2e8f0; white-space:nowrap; cursor:pointer;
+  user-select:none; position:sticky; top:0; background:#f8fafc;
+}
+th:hover { color:#3b82f6; }
+td { padding:12px 14px; border-bottom:1px solid #f1f5f9; }
+tr:hover td { background:#f8fafc; }
+.empt { color:#94a3b8; font-style:italic; }
+.scr {
+  display:inline-block; min-width:32px; text-align:center;
+  padding:2px 8px; border-radius:6px; font-weight:700; font-size:12px;
+}
+.scr.high { background:#d1fae5; color:#065f46; }
+.scr.med { background:#fef3c7; color:#92400e; }
+.scr.low { background:#fee2e2; color:#991b1b; }
+.scr.nil { background:#f1f5f9; color:#94a3b8; }
+.tel { font-variant-numeric:tabular-nums; }
+.adr { color:#475569; max-width:200px; }
+.ind { color:#64748b; max-width:160px; }
+.src-badge {
+  display:inline-block; padding:2px 8px; border-radius:4px;
+  font-size:11px; font-weight:600; white-space:nowrap;
+}
+.src-justdial { background:#e0f2fe; color:#0369a1; }
+.src-indiamart { background:#fef3c7; color:#92400e; }
+.src-tradeindia { background:#d1fae5; color:#065f46; }
+.src-unknown { background:#f1f5f9; color:#64748b; }
+.foot { max-width:1280px; margin:20px auto 0; text-align:center; font-size:12px; color:#94a3b8; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Lead Prospecting Dashboard</h1>
+    <div class="sub">Live aggregated data from Indian business directories</div>
+  </div>
+  <div class="badge"><span>&#9679;</span> Jul 28, 2026 at 08:11 PM</div>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="lbl">Total Leads</div><div class="val blue">37</div></div>
+  <div class="card"><div class="lbl">Avg Score</div><div class="val gold">20.0</div></div>
+  <div class="card"><div class="lbl">With Phone</div><div class="val green">37</div></div>
+  <div class="card"><div class="lbl">With Email</div><div class="val purple">0</div></div>
+  <div class="card"><div class="lbl">With Website</div><div class="val red">6</div></div>
+  <div class="card"><div class="lbl">IndiaMART</div><div class="val blue">28</div></div><div class="card"><div class="lbl">Justdial</div><div class="val blue">9</div></div>
+</div>
+
+<div class="controls">
+  <input type="text" id="q" placeholder="Search name, phone, address, industry..." oninput="draw()">
+  <select id="sf" onchange="draw()">
+    <option value="">All scores</option>
+    <option value="high">High (60-100)</option>
+    <option value="med">Medium (20-59)</option>
+    <option value="low">Low (0-19)</option>
+    <option value="nil">No score</option>
+  </select>
+  <select id="srcf" onchange="draw()">
+    <option value="">All sources</option>
+    <option value="IndiaMART">IndiaMART (28)</option><option value="Justdial">Justdial (9)</option>
+  </select>
+  <select id="hasf" onchange="draw()">
+    <option value="">Any fields</option>
+    <option value="phone">Has phone</option>
+    <option value="email">Has email</option>
+    <option value="website">Has website</option>
+    <option value="phone_email">Has phone &amp; email</option>
+  </select>
+  <div class="cnt" id="cnt"></div>
+</div>
+
+<div class="wrap">
+<table>
+<thead><tr>
+  <th onclick="sort(0)">#</th>
+  <th onclick="sort(1)">Company</th>
+  <th onclick="sort(2)">Source</th>
+  <th onclick="sort(3)">Phone</th>
+  <th onclick="sort(4)">Email</th>
+  <th onclick="sort(5)">Website</th>
+  <th onclick="sort(6)">Address</th>
+  <th onclick="sort(7)">Industry</th>
+  <th onclick="sort(8)">Score</th>
+</tr></thead>
+<tbody id="tb"></tbody>
+</table>
+</div>
+
+<div class="foot">Lead Prospecting Pipeline &mdash; Built with Scrapling &amp; SQLite</div>
+
+<script>
+const _data = [{"company_name": "Aahu Infotech Solutions", "website": "", "email": "", "phone": "8043892747", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Aarchi Computers", "website": "", "email": "", "phone": "08105803438", "address": "Near Goverment College Noida Sector 22", "industry_code": "Computer Repair & Services, Laptop Repair & Services", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Arcoders Digital Solutions", "website": "", "email": "", "phone": "8048204871", "address": "New Delhi, New Delhi", "industry_code": "CRM Application Development Services Arcoders Digital Solutions Empower your business with intelligent customer relationship management solutions from Arcoders Digital Solutions. We specialize in deve", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Basawa Technologies Limited", "website": "https://www.basawabarcodesolutions.com/", "email": "", "phone": "8047549182", "address": "Okhla Industrial Estate, New Delhi, New Delhi", "industry_code": "Barcode Software Development Services provide customized barcode-based solutions tailored to your business needs. From barcode generation and label design to scanning integration and system automation", "lead_score": 20, "dedup_key": "basawabarcodesolutions.com", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Codetrex Infotech Pvt. Ltd.", "website": "", "email": "", "phone": "8047632653", "address": "Gurugram, Gurugram", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Cryptic Techo Private Limited", "website": "https://www.cryptictecho.in/", "email": "", "phone": "7942551936", "address": "New Delhi, New Delhi", "industry_code": "Product Description: Transform the way you sell online with our advanced E-Commerce Software Development Services. We design and develop scalable, secure, and feature-rich e-commerce software tailored", "lead_score": 20, "dedup_key": "cryptictecho.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Dailyever Technologies LLP", "website": "", "email": "", "phone": "7942544077", "address": "New Delhi, New Delhi", "industry_code": "Empower your business with our end-to-end software development services delivering custom-built, scalable, and high-performance solutions designed to streamline operations and accelerate digital growt", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Delphi Infotech Pvt Ltd", "website": "", "email": "", "phone": "09724663228", "address": " Dwarka Sector 26", "industry_code": "IT Solution Providers, Cyber Security Services", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Efficient IT And Electronics Services Private Limited", "website": "", "email": "", "phone": "8043821607", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "GGM Technologies", "website": "https://www.ggmtechnologies.in/", "email": "", "phone": "8043869382", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "ggmtechnologies.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "GS Infotechs", "website": "", "email": "", "phone": "07043127971", "address": "Near By Mothers Pride School Delta 1", "industry_code": "Computer Repair & Services, Laptop Repair & Services", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Gcon Technologies", "website": "", "email": "", "phone": "7948549143", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Helcon Technologies Private Limited", "website": "", "email": "", "phone": "8047672549", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Hide Media", "website": "", "email": "", "phone": "07043176385", "address": "Near By Disha Educational Consultant Noida Sector 63", "industry_code": "Digital Marketing Services, Internet Website Developers", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Infinevo Tech Private Limited", "website": "", "email": "", "phone": "7949326082", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Infutive Technology Pvt. Ltd.", "website": "", "email": "", "phone": "8043848550", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Kudamm Corporation", "website": "", "email": "", "phone": "8047622895", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Live Solution Wale Private Limited", "website": "", "email": "", "phone": "08123717780", "address": "Near Chawla Resturant Mukherjee Nagar", "industry_code": "Stationery Wholesalers, IT Solution Providers", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Mindsync Consulting Pvt. Ltd.", "website": "", "email": "", "phone": "8048247141", "address": "New Delhi, New Delhi", "industry_code": "At Mindsync Consulting Pvt Ltd , we specialize in providing end-to-end Software Development Services designed to help businesses automate processes, enhance efficiency, and achieve digital transformat", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Ncl Systems Private Limited", "website": "", "email": "", "phone": "08123522661", "address": "Near Main Road Noida Sector 63", "industry_code": "IT Solution Providers, Computer Networking Services", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Nitai Technologies (OPC) Private Limited", "website": "", "email": "", "phone": "7942614451", "address": "Uttam Nagar, New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Om Sai Techno Services Pvt Ltd", "website": "", "email": "", "phone": "08105766989", "address": "Near Happy School Darya Ganj", "industry_code": "Computer Repair & Services, Laptop Repair & Services", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Orus Studio", "website": "", "email": "", "phone": "7949311617", "address": "Deals in New Delhi, Kolkata", "industry_code": "Software development services involve the end-to-end process of designing, building, testing, deploying, and maintaining custom software applications tailored to specific business needs. These service", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Qurilo Solutions Private Limited", "website": "", "email": "", "phone": "7949338292", "address": "Uttam Nagar, New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "RS Top Coder", "website": "", "email": "", "phone": "7942832327", "address": "Jamia Nagar, New Delhi, New Delhi", "industry_code": "Enterprise software solutions services that deliver robust, scalable, and secure applications to streamline complex business processes, enhance collaboration, and drive organizational efficiency", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "SFP Education & Technology Private Limited", "website": "", "email": "", "phone": "7942839515", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Sol9x Private Limited", "website": "", "email": "", "phone": "7949342735", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Steigenberg", "website": "", "email": "", "phone": "08460305857", "address": "Nangloi Metro Station Nangloi", "industry_code": "Internet Website Developers, Internet Website Designers", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Taksh IT Solutions Private Limited", "website": "https://www.takshitsoftware.com/", "email": "", "phone": "7942964463", "address": "Noida, Dist. Gautam Buddha Nagar, Noida", "industry_code": "Taksh IT Solutions Private Limited provides professional software development and digital transformation services designed to help businesses build secure, scalable, and high-performance technology so", "lead_score": 20, "dedup_key": "takshitsoftware.com", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Tech Samadhan", "website": "", "email": "", "phone": "8043858343", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Teknoez", "website": "", "email": "", "phone": "08401399295", "address": " Badshahpur Gurgaon", "industry_code": "Internet Website Developers, Software Companies", "lead_score": 20, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Vibhum Software Services Private Limited", "website": "", "email": "", "phone": "8047814588", "address": "New Delhi, New Delhi", "industry_code": "Transform your business operations with our Custom Software Development Services . We build powerful, secure, and scalable software solutions tailored to your exact business needs. Whether you need CR", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Web Lytics Infotech", "website": "", "email": "", "phone": "8047816752", "address": "New Delhi, New Delhi", "industry_code": "Description Restaurant billing software development services offer customized Point of Sale (POS) solutions with features like order management, inventory control, GST/tax handling, multiple payment o", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Wemonde Private Limited", "website": "https://www.wemonde.co.in/", "email": "", "phone": "8043820594", "address": "Dhulsiras, New Delhi, New Delhi", "industry_code": "Try the most agile HRMS software for your growth needs Free for One Year Let iHRMS handle the complexities of employee management solutions, so you can focus on growing your business! Features Dashboa", "lead_score": 20, "dedup_key": "wemonde.co.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Wom Solutions (wheelsonmap)", "website": "https://www.vtssystem.in/", "email": "", "phone": "8047849672", "address": "New Delhi, New Delhi", "industry_code": "FMB001 is tracking terminal with GNSS, GSM connectivity, and OBDII support, which is able to collect device coordinates and transfer them via GSM network to server. This device is perfectly suitablefo", "lead_score": 20, "dedup_key": "vtssystem.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Xcrino Business Solutions", "website": "", "email": "", "phone": "7948219311", "address": "New Delhi, New Delhi", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Zentelex Pvt. Ltd.", "website": "", "email": "", "phone": "8048212862", "address": "Deals in New Delhi, Kolkata", "industry_code": "", "lead_score": 20, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}];
+function _c(v) { return (v===null||v===undefined||String(v).trim()==='')?'<span class="empt">—</span>':String(v); }
+function _s(src) {
+  var cls='src-unknown';
+  if(src==='Justdial') cls='src-justdial';
+  else if(src==='IndiaMART') cls='src-indiamart';
+  else if(src==='TradeIndia') cls='src-tradeindia';
+  return '<span class="src-badge '+cls+'">'+src+'</span>';
+}
+const _f = ['company_name','source','phone','email','website','address','industry_code','lead_score'];
+let _sc=-1,_sa=true;
+
+function draw() {
+  var q=document.getElementById('q').value.toLowerCase();
+  var sf=document.getElementById('sf').value;
+  var srcf=document.getElementById('srcf').value;
+  var hasf=document.getElementById('hasf').value;
+  var rows=_data.filter(function(r){
+    var s=(r.company_name+' '+(r.phone||'')+' '+(r.address||'')+' '+(r.industry_code||'')).toLowerCase();
+    if(q&&!s.includes(q)) return false;
+    var sc=r.lead_score;
+    if(sf==='high'&&(sc===null||sc<60)) return false;
+    if(sf==='med'&&(sc===null||sc<20||sc>=60)) return false;
+    if(sf==='low'&&(sc===null||sc>=20)) return false;
+    if(sf==='nil'&&sc!==null) return false;
+    if(srcf&&r.source!==srcf) return false;
+    if(hasf==='phone'&&!r.phone) return false;
+    if(hasf==='email'&&!r.email) return false;
+    if(hasf==='website'&&!r.website) return false;
+    if(hasf==='phone_email'&&(!r.phone||!r.email)) return false;
+    return true;
+  });
+  if(_sc>=0){var k=_f[_sc];rows.sort(function(a,b){
+    var va=(a[k]===null||a[k]===undefined?'':String(a[k])).toLowerCase();
+    var vb=(b[k]===null||b[k]===undefined?'':String(b[k])).toLowerCase();
+    if(k==='lead_score'){va=Number(va);vb=Number(vb);}
+    return va<vb?_sa?-1:1:va>vb?_sa?1:-1:0;
+  });}
+  document.getElementById('cnt').textContent='Showing '+rows.length+' of '+_data.length;
+  document.getElementById('tb').innerHTML=rows.map(function(r,i){
+    var sc=r.lead_score;
+    var scls=sc===null?'nil':sc>=60?'high':sc>=20?'med':'low';
+    return '<tr><td>'+(i+1)+'</td><td><strong>'+_c(r.company_name)+'</strong></td>'+
+      '<td>'+_s(r.source)+'</td>'+
+      '<td class="tel">'+_c(r.phone)+'</td><td>'+_c(r.email)+'</td>'+
+      '<td>'+_c(r.website)+'</td><td class="adr">'+_c(r.address)+'</td>'+
+      '<td class="ind">'+_c(r.industry_code).substring(0,120)+'</td>'+
+      '<td><span class="scr '+scls+'">'+(sc===null?'—':sc)+'</span></td></tr>';
+  }).join('');
+}
+
+function sort(c){if(_sc===c)_sa=!_sa;else{_sc=c;_sa=true;}draw();}
+draw();
+</script>
+</body>
+</html>

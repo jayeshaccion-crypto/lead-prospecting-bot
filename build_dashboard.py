@@ -1,27 +1,47 @@
 """Generate a standalone HTML dashboard from the lead database."""
-import sqlite3, json
+import sqlite3, json, re
 from pathlib import Path
 from datetime import datetime
+from collections import Counter
 
 DB = Path("data") / "leads.db"
 OUT = Path("dashboard.html")
+
+SOURCE_MAP = {
+    "justdial.com": "Justdial",
+    "indiamart.com": "IndiaMART",
+    "tradeindia.com": "TradeIndia",
+}
+
+
+def _source_name(url: str | None) -> str:
+    if not url:
+        return "Unknown"
+    for domain, label in SOURCE_MAP.items():
+        if domain in url:
+            return label
+    return url.split("/")[2] if "//" in url else "Unknown"
 
 
 def build():
     if not DB.exists():
         print(f"Database not found at {DB} — nothing to build")
         return 0
+
     conn = sqlite3.connect(str(DB))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    cur.execute("SELECT company_name, website, email, phone, address, industry_code, lead_score, dedup_key FROM Leads ORDER BY COALESCE(lead_score, '0') DESC, company_name")
+    cur.execute("SELECT company_name, website, email, phone, address, industry_code, lead_score, dedup_key, source_url FROM Leads ORDER BY COALESCE(lead_score, '0') DESC, company_name")
     rows = []
     for r in cur.fetchall():
         d = dict(r)
         if d.get("lead_score"):
-            try: d["lead_score"] = int(d["lead_score"])
-            except: pass
+            try:
+                d["lead_score"] = int(d["lead_score"])
+            except ValueError:
+                pass
+        d["source"] = _source_name(d.get("source_url"))
         rows.append(d)
 
     total = len(rows)
@@ -31,10 +51,19 @@ def build():
     domains = sum(1 for r in rows if r.get("dedup_key"))
     scores = [r["lead_score"] for r in rows if isinstance(r.get("lead_score"), int)]
     avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+    source_counts = Counter(r["source"] for r in rows)
 
     conn.close()
-
     data_json = json.dumps(rows)
+
+    source_options = "".join(
+        f'<option value="{s}">{s} ({c})</option>'
+        for s, c in sorted(source_counts.items())
+    )
+    source_cards = "".join(
+        f'<div class="card"><div class="lbl">{s}</div><div class="val blue">{c}</div></div>'
+        for s, c in sorted(source_counts.items(), key=lambda x: -x[1])
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -47,9 +76,9 @@ def build():
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{
-  font-family: 'Inter', -apple-system, sans-serif;
-  background: #f0f4f8; color: #1a2332;
-  padding: 32px 24px; line-height: 1.5;
+  font-family:'Inter',-apple-system,sans-serif;
+  background:#f0f4f8; color:#1a2332;
+  padding:32px 24px; line-height:1.5;
 }}
 .header {{
   max-width:1280px; margin:0 auto 32px;
@@ -86,32 +115,32 @@ body {{
 .val.red {{ color:#ef4444; }} .val.teal {{ color:#06b6d4; }}
 .controls {{
   max-width:1280px; margin:0 auto 16px;
-  display:flex; gap:12px; flex-wrap:wrap; align-items:center;
+  display:flex; gap:10px; flex-wrap:wrap; align-items:center;
 }}
 .controls input,.controls select {{
-  padding:10px 16px; border:1px solid #e2e8f0; border-radius:8px;
-  font-size:14px; font-family:inherit; background:#fff;
-  outline:none; transition:border-color .15s;
+  padding:10px 14px; border:1px solid #e2e8f0; border-radius:8px;
+  font-size:13px; font-family:inherit; background:#fff;
+  outline:none; transition:border-color .15s; color:#1a2332;
 }}
 .controls input:focus,.controls select:focus {{ border-color:#3b82f6; }}
-.controls input {{ flex:1 1 260px; }}
-.controls select {{ width:160px; }}
-.controls .cnt {{ font-size:13px; color:#64748b; margin-left:auto; }}
+.controls input {{ flex:1 1 220px; }}
+.controls select {{ width:auto; min-width:130px; }}
+.controls .cnt {{ font-size:13px; color:#64748b; margin-left:auto; white-space:nowrap; }}
 .wrap {{
   max-width:1280px; margin:0 auto;
   background:#fff; border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,.06);
   overflow-x:auto;
 }}
-table {{ width:100%; border-collapse:collapse; font-size:13px; min-width:900px; }}
+table {{ width:100%; border-collapse:collapse; font-size:13px; min-width:1000px; }}
 thead {{ background:#f8fafc; }}
 th {{
-  text-align:left; padding:14px 16px; font-weight:600; font-size:11px;
+  text-align:left; padding:14px 14px; font-weight:600; font-size:11px;
   color:#64748b; text-transform:uppercase; letter-spacing:.5px;
   border-bottom:1px solid #e2e8f0; white-space:nowrap; cursor:pointer;
   user-select:none; position:sticky; top:0; background:#f8fafc;
 }}
 th:hover {{ color:#3b82f6; }}
-td {{ padding:12px 16px; border-bottom:1px solid #f1f5f9; }}
+td {{ padding:12px 14px; border-bottom:1px solid #f1f5f9; }}
 tr:hover td {{ background:#f8fafc; }}
 .empt {{ color:#94a3b8; font-style:italic; }}
 .scr {{
@@ -123,8 +152,16 @@ tr:hover td {{ background:#f8fafc; }}
 .scr.low {{ background:#fee2e2; color:#991b1b; }}
 .scr.nil {{ background:#f1f5f9; color:#94a3b8; }}
 .tel {{ font-variant-numeric:tabular-nums; }}
-.adr {{ color:#475569; max-width:220px; }}
-.ind {{ color:#64748b; max-width:180px; }}
+.adr {{ color:#475569; max-width:200px; }}
+.ind {{ color:#64748b; max-width:160px; }}
+.src-badge {{
+  display:inline-block; padding:2px 8px; border-radius:4px;
+  font-size:11px; font-weight:600; white-space:nowrap;
+}}
+.src-justdial {{ background:#e0f2fe; color:#0369a1; }}
+.src-indiamart {{ background:#fef3c7; color:#92400e; }}
+.src-tradeindia {{ background:#d1fae5; color:#065f46; }}
+.src-unknown {{ background:#f1f5f9; color:#64748b; }}
 .foot {{ max-width:1280px; margin:20px auto 0; text-align:center; font-size:12px; color:#94a3b8; }}
 </style>
 </head>
@@ -133,7 +170,7 @@ tr:hover td {{ background:#f8fafc; }}
 <div class="header">
   <div>
     <h1>Lead Prospecting Dashboard</h1>
-    <div class="sub">Live data from Justdial, IndiaMART &amp; TradeIndia</div>
+    <div class="sub">Live aggregated data from Indian business directories</div>
   </div>
   <div class="badge"><span>&#9679;</span> {datetime.now().strftime("%b %d, %Y at %I:%M %p")}</div>
 </div>
@@ -144,17 +181,28 @@ tr:hover td {{ background:#f8fafc; }}
   <div class="card"><div class="lbl">With Phone</div><div class="val green">{phones}</div></div>
   <div class="card"><div class="lbl">With Email</div><div class="val purple">{emails}</div></div>
   <div class="card"><div class="lbl">With Website</div><div class="val red">{websites}</div></div>
-  <div class="card"><div class="lbl">With Dedup Key</div><div class="val teal">{domains}</div></div>
+  {source_cards}
 </div>
 
 <div class="controls">
-  <input type="text" id="q" placeholder="Search company, phone, address..." oninput="draw()">
+  <input type="text" id="q" placeholder="Search name, phone, address, industry..." oninput="draw()">
   <select id="sf" onchange="draw()">
-    <option value="">All Scores</option>
+    <option value="">All scores</option>
     <option value="high">High (60-100)</option>
     <option value="med">Medium (20-59)</option>
     <option value="low">Low (0-19)</option>
-    <option value="nil">No Score</option>
+    <option value="nil">No score</option>
+  </select>
+  <select id="srcf" onchange="draw()">
+    <option value="">All sources</option>
+    {source_options}
+  </select>
+  <select id="hasf" onchange="draw()">
+    <option value="">Any fields</option>
+    <option value="phone">Has phone</option>
+    <option value="email">Has email</option>
+    <option value="website">Has website</option>
+    <option value="phone_email">Has phone &amp; email</option>
   </select>
   <div class="cnt" id="cnt"></div>
 </div>
@@ -164,13 +212,13 @@ tr:hover td {{ background:#f8fafc; }}
 <thead><tr>
   <th onclick="sort(0)">#</th>
   <th onclick="sort(1)">Company</th>
-  <th onclick="sort(2)">Phone</th>
-  <th onclick="sort(3)">Email</th>
-  <th onclick="sort(4)">Website</th>
-  <th onclick="sort(5)">Address</th>
-  <th onclick="sort(6)">Industry</th>
-  <th onclick="sort(7)">Score</th>
-  <th onclick="sort(8)">Dedup Key</th>
+  <th onclick="sort(2)">Source</th>
+  <th onclick="sort(3)">Phone</th>
+  <th onclick="sort(4)">Email</th>
+  <th onclick="sort(5)">Website</th>
+  <th onclick="sort(6)">Address</th>
+  <th onclick="sort(7)">Industry</th>
+  <th onclick="sort(8)">Score</th>
 </tr></thead>
 <tbody id="tb"></tbody>
 </table>
@@ -181,37 +229,52 @@ tr:hover td {{ background:#f8fafc; }}
 <script>
 const _data = {data_json};
 function _c(v) {{ return (v===null||v===undefined||String(v).trim()==='')?'<span class="empt">\u2014</span>':String(v); }}
-const _f = ['company_name','phone','email','website','address','industry_code','lead_score','dedup_key'];
+function _s(src) {{
+  var cls='src-unknown';
+  if(src==='Justdial') cls='src-justdial';
+  else if(src==='IndiaMART') cls='src-indiamart';
+  else if(src==='TradeIndia') cls='src-tradeindia';
+  return '<span class="src-badge '+cls+'">'+src+'</span>';
+}}
+const _f = ['company_name','source','phone','email','website','address','industry_code','lead_score'];
 let _sc=-1,_sa=true;
 
 function draw() {{
-  const q=document.getElementById('q').value.toLowerCase(), sf=document.getElementById('sf').value;
-  let rows=_data.filter(r=>{{
-    const s=(r.company_name+' '+(r.phone||'')+' '+(r.address||'')+' '+(r.industry_code||'')).toLowerCase();
-    if(q&&!s.includes(q))return false;
-    const sc=r.lead_score;
-    if(sf==='high'&&(sc===null||sc<60))return false;
-    if(sf==='med'&&(sc===null||sc<20||sc>=60))return false;
-    if(sf==='low'&&(sc===null||sc>=20))return false;
-    if(sf==='nil'&&sc!==null)return false;
+  var q=document.getElementById('q').value.toLowerCase();
+  var sf=document.getElementById('sf').value;
+  var srcf=document.getElementById('srcf').value;
+  var hasf=document.getElementById('hasf').value;
+  var rows=_data.filter(function(r){{
+    var s=(r.company_name+' '+(r.phone||'')+' '+(r.address||'')+' '+(r.industry_code||'')).toLowerCase();
+    if(q&&!s.includes(q)) return false;
+    var sc=r.lead_score;
+    if(sf==='high'&&(sc===null||sc<60)) return false;
+    if(sf==='med'&&(sc===null||sc<20||sc>=60)) return false;
+    if(sf==='low'&&(sc===null||sc>=20)) return false;
+    if(sf==='nil'&&sc!==null) return false;
+    if(srcf&&r.source!==srcf) return false;
+    if(hasf==='phone'&&!r.phone) return false;
+    if(hasf==='email'&&!r.email) return false;
+    if(hasf==='website'&&!r.website) return false;
+    if(hasf==='phone_email'&&(!r.phone||!r.email)) return false;
     return true;
   }});
-  if(_sc>=0){{const k=_f[_sc];rows.sort((a,b)=>{{
-    let va=(a[k]===null||a[k]===undefined?'':String(a[k])).toLowerCase();
-    let vb=(b[k]===null||b[k]===undefined?'':String(b[k])).toLowerCase();
+  if(_sc>=0){{var k=_f[_sc];rows.sort(function(a,b){{
+    var va=(a[k]===null||a[k]===undefined?'':String(a[k])).toLowerCase();
+    var vb=(b[k]===null||b[k]===undefined?'':String(b[k])).toLowerCase();
     if(k==='lead_score'){{va=Number(va);vb=Number(vb);}}
     return va<vb?_sa?-1:1:va>vb?_sa?1:-1:0;
   }});}}
   document.getElementById('cnt').textContent='Showing '+rows.length+' of '+_data.length;
-  document.getElementById('tb').innerHTML=rows.map((r,i)=>{{
-    const sc=r.lead_score;
-    const scls=sc===null?'nil':sc>=60?'high':sc>=20?'med':'low';
+  document.getElementById('tb').innerHTML=rows.map(function(r,i){{
+    var sc=r.lead_score;
+    var scls=sc===null?'nil':sc>=60?'high':sc>=20?'med':'low';
     return '<tr><td>'+(i+1)+'</td><td><strong>'+_c(r.company_name)+'</strong></td>'+
+      '<td>'+_s(r.source)+'</td>'+
       '<td class="tel">'+_c(r.phone)+'</td><td>'+_c(r.email)+'</td>'+
       '<td>'+_c(r.website)+'</td><td class="adr">'+_c(r.address)+'</td>'+
       '<td class="ind">'+_c(r.industry_code).substring(0,120)+'</td>'+
-      '<td><span class="scr '+scls+'">'+(sc===null?'\u2014':sc)+'</span></td>'+
-      '<td>'+_c(r.dedup_key)+'</td></tr>';
+      '<td><span class="scr '+scls+'">'+(sc===null?'\u2014':sc)+'</span></td></tr>';
   }}).join('');
 }}
 
@@ -222,7 +285,7 @@ draw();
 </html>"""
 
     OUT.write_text(html, encoding="utf-8")
-    print(f"Dashboard written to {OUT.resolve()}")
+    print(f"Dashboard written to {OUT.resolve()} ({len(rows)} records)")
     return len(rows)
 
 

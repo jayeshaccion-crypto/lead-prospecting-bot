@@ -1,0 +1,24 @@
+[project]
+name = "lead-prospecting-bot"
+version = "0.1.0"
+description = "Automated lead prospecting pipeline — scrapes public directories, enriches via API, deduplicates, and writes to Google Sheets."
+requires-python = ">=3.11"
+dependencies = [
+    "scrapling>=0.4",
+    "google-api-python-client>=2.0",
+    "google-auth>=2.0",
+    "pydantic>=2.0",
+    "httpx>=0.25",
+    "python-dotenv>=1.0",
+    "apscheduler>=3.10",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+lead-prospecting = "src.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-mock>=3.14"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

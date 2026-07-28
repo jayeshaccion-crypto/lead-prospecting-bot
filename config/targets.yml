@@ -1,0 +1,23 @@
+# Target sites for the lead prospecting pipeline.
+# All targets are Indian business directories.
+# The parser key maps to a registered parser function in src/scraper/targets.py.
+# Uncomment and configure entries as parsers are implemented.
+
+targets:
+  # - name: "Justdial"
+  #   entry_url: "https://www.justdial.com/"
+  #   parser: "parse_justdial"
+  #   fetch_kwargs:
+  #     timeout: 60000
+
+  # - name: "IndiaMART"
+  #   entry_url: "https://www.indiamart.com/"
+  #   parser: "parse_indiamart"
+  #   fetch_kwargs:
+  #     timeout: 60000
+
+  # - name: "TradeIndia"
+  #   entry_url: "https://www.tradeindia.com/"
+  #   parser: "parse_tradeindia"
+  #   fetch_kwargs:
+  #     timeout: 60000

@@ -2,17 +2,23 @@ targets:
   - name: "Justdial"
     entry_url: "https://www.justdial.com/Delhi/IT-Services/nct-10278073"
     parser: "parse_justdial"
+    pages: 3
     fetch_kwargs:
       timeout: 60000
+      max_detail_pages: 0
 
   - name: "IndiaMART"
     entry_url: "https://dir.indiamart.com/new-delhi/software-development-services.html"
     parser: "parse_indiamart"
+    pages: 3
     fetch_kwargs:
       timeout: 60000
+      max_detail_pages: 15
 
   - name: "TradeIndia"
     entry_url: "https://www.tradeindia.com/manufacturers/it-consultancy.html"
     parser: "parse_tradeindia"
+    pages: 1
     fetch_kwargs:
       timeout: 60000
+      max_detail_pages: 10

@@ -1,3 +1,9 @@
+"""Tab management functions for the SQLite database client."""
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 LEADS_HEADERS = [
     "company_name", "website", "email", "phone", "address",
     "industry_code", "employee_count", "revenue_band", "source_url",
@@ -22,5 +28,15 @@ def ensure_all_tabs(client) -> dict[str, bool]:
     }
     created = {}
     for name, headers in tabs.items():
-        client.ensure_tab(name, headers)
+        created[name] = client.ensure_tab(name, headers)
+    newly_created = [k for k, v in created.items() if v]
+    if newly_created:
+        logger.info("Created database tables: %s", ", ".join(newly_created))
     return created
+
+
+def write_staging(client, lead_rows: list[list]):
+    client.clear_tab("staging")
+    rows = [STAGING_HEADERS, *lead_rows]
+    client.append_rows("staging", rows)
+    logger.info("Wrote %d rows (including header) to staging tab", len(rows))

@@ -143,3 +143,48 @@ class TestScrapeAllTargets:
         assert len(records) == 2
         assert len(errors) == 1
         assert errors[0].url == "https://site2.com"
+
+    def test_logs_scrape_progress(self, caplog):
+        import logging
+        caplog.set_level(logging.INFO)
+        config = [
+            {"entry_url": "https://site1.com", "parser": "p1"},
+            {"entry_url": "https://site2.com", "parser": "p2"},
+        ]
+        with patch.object(scraper_engine, "is_robots_allowed", return_value=True):
+            with patch.object(
+                scraper_engine,
+                "scrape_target",
+                side_effect=[
+                    [RawRecord(company_name="A")],
+                    [RawRecord(company_name="B"), RawRecord(company_name="C")],
+                ],
+            ):
+                scraper_engine.scrape_all_targets(config)
+
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any("Scraping target: https://site1.com" in msg for msg in info_messages)
+        assert any("Scraped 1 records from https://site1.com" in msg for msg in info_messages)
+        assert any("Scraping target: https://site2.com" in msg for msg in info_messages)
+        assert any("Scraped 2 records from https://site2.com" in msg for msg in info_messages)
+        assert any("Scrape complete: 3 total records" in msg for msg in info_messages)
+
+    def test_logs_robots_disallow_warning(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        config = [{"entry_url": "https://blocked.com", "parser": "p1"}]
+        with patch.object(scraper_engine, "is_robots_allowed", return_value=False):
+            with patch.object(scraper_engine, "scrape_target"):
+                scraper_engine.scrape_all_targets(config)
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert any("Robots.txt disallows" in msg for msg in warning_messages)
+
+    def test_logs_failure_warning(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        config = [{"entry_url": "https://fail.com", "parser": "p1"}]
+        with patch.object(scraper_engine, "is_robots_allowed", return_value=True):
+            with patch.object(scraper_engine, "scrape_target", side_effect=RuntimeError("fail")):
+                scraper_engine.scrape_all_targets(config)
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert any("Failed to scrape https://fail.com" in msg for msg in warning_messages)

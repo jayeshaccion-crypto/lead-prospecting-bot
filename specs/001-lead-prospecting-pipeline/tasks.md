@@ -79,10 +79,10 @@ description: "Task list for the Lead Prospecting Pipeline feature"
 
 **Independent Test**: Run pipeline and verify employee_count and revenue_band columns are populated for records where API returned data, and lead_score is 0-100 per formula.
 
-- [ ] T020 [P] [US2] Implement enrichment API client in `src/enrichment/client.py`: EnrichmentClient with configurable base URL and API key header, get_enrichment(domain) method returning employee_count and revenue_band
-- [ ] T021 [P] [US2] Implement lead scoring in `src/scoring.py`: compute_lead_score() with deterministic formula from data-model.md, configurable target_industry_list
-- [ ] T022 [US2] Implement enrichment orchestration in `src/enrichment/client.py`: enrich_records() that calls API per unique domain, handles non-200 and timeout gracefully (leaves enrichment fields null)
-- [ ] T023 [US2] Implement enrichment integration test in `tests/test_enrichment.py`: mock API response and verify enrichment fields are populated correctly on LeadRecord
+- [X] T020 [P] [US2] Implement enrichment API client in `src/enrichment/client.py`: EnrichmentClient with configurable base URL and API key header, get_enrichment(domain) method returning employee_count and revenue_band
+- [X] T021 [P] [US2] Implement lead scoring in `src/scoring.py`: compute_lead_score() with deterministic formula from data-model.md, configurable target_industry_list
+- [X] T022 [US2] Implement enrichment orchestration in `src/enrichment/client.py`: enrich_records() that calls API per unique domain, handles non-200 and timeout gracefully (leaves enrichment fields null)
+- [X] T023 [US2] Implement enrichment integration test in `tests/test_enrichment.py`: mock API response and verify enrichment fields are populated correctly on LeadRecord
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently — records can be scraped, enriched, and scored.
 
@@ -94,10 +94,10 @@ description: "Task list for the Lead Prospecting Pipeline feature"
 
 **Independent Test**: Insert two records with same dedup_key but different enrichment levels; verify the richer record is kept and the other is logged to rejected_duplicates.
 
-- [ ] T024 [P] [US3] Implement deduplication logic in `src/pipeline.py`: deduplicate_records() that groups by dedup_key, compares enrichment field count, keeps the richer, returns (kept_records, rejected_records)
-- [ ] T025 [US3] Implement idempotent sheet append in `src/sheets/client.py`: append_if_not_duplicate() that reads existing dedup_keys from sheet before appending, skips already-seen keys
-- [ ] T026 [US3] Implement rejected_duplicates logging in `src/pipeline.py`: writes RejectedDuplicate rows to rejected_duplicates sheet tab with dedup_key, kept_company, rejected_company, reason, timestamp
-- [ ] T027 [US3] Implement dedup integration test in `tests/test_dedup.py`: mock two records with same domain, verify one kept, one rejected, sheet dedup_key check prevents double-write
+- [X] T024 [P] [US3] Implement deduplication logic in `src/pipeline.py`: deduplicate_records() that groups by dedup_key, compares enrichment field count, keeps the richer, returns (kept_records, rejected_records)
+- [X] T025 [US3] Implement idempotent sheet append in `src/sheets/client.py`: append_if_not_duplicate() that reads existing dedup_keys from sheet before appending, skips already-seen keys
+- [X] T026 [US3] Implement rejected_duplicates logging in `src/pipeline.py`: writes RejectedDuplicate rows to rejected_duplicates sheet tab with dedup_key, kept_company, rejected_company, reason, timestamp
+- [X] T027 [US3] Implement dedup integration test in `tests/test_dedup.py`: mock two records with same domain, verify one kept, one rejected, sheet dedup_key check prevents double-write
 
 **Checkpoint**: All P1 user stories should now be independently functional.
 
@@ -109,12 +109,12 @@ description: "Task list for the Lead Prospecting Pipeline feature"
 
 **Independent Test**: Run with --dry-run flag, verify output appears only in staging tab. Verify that promotion copies staging rows to production tab.
 
-- [ ] T028 [US4] Implement pipeline orchestration in `src/pipeline.py`: main_pipeline() that orchestrates scrape → enrich → dedup → score → validate → write_to_staging
-- [ ] T029 [US4] Implement dry-run mode in `src/pipeline.py`: skip production tab write when --dry-run is set, write only to staging tab
-- [ ] T030 [US4] Implement failure threshold check in `src/pipeline.py`: check_failure_threshold() that aborts promotion if >30% of targets failed
-- [ ] T031 [US4] Implement promotion logic in `src/pipeline.py`: promote_to_production() that copies staging rows to production tab after human approval signal
-- [ ] T032 [US4] Implement staging write in `src/sheets/tabs.py`: write_staging() that clears and rewrites staging tab with current batch rows
-- [ ] T033 [US4] Implement promotion command entry point in `src/__main__.py`: --promote flag that copies staging to production with threshold check
+- [X] T028 [US4] Implement pipeline orchestration in `src/pipeline.py`: main_pipeline() that orchestrates scrape → enrich → dedup → score → validate → write_to_staging
+- [X] T029 [US4] Implement dry-run mode in `src/pipeline.py`: skip production tab write when --dry-run is set, write only to staging tab
+- [X] T030 [US4] Implement failure threshold check in `src/pipeline.py`: check_failure_threshold() that aborts promotion if >30% of targets failed
+- [X] T031 [US4] Implement promotion logic in `src/pipeline.py`: promote_to_production() that copies staging rows to production tab after human approval signal
+- [X] T032 [US4] Implement staging write in `src/sheets/tabs.py`: write_staging() that clears and rewrites staging tab with current batch rows
+- [X] T033 [US4] Implement promotion command entry point in `src/__main__.py`: --promote flag that copies staging to production with threshold check
 
 **Checkpoint**: User Story 4 complete — dry-run and promotion workflow works end-to-end.
 
@@ -126,10 +126,10 @@ description: "Task list for the Lead Prospecting Pipeline feature"
 
 **Independent Test**: Feed deliberately malformed records (empty company_name, missing email+phone, bad email format) and verify each is handled correctly.
 
-- [ ] T034 [US5] Implement row validation in `src/validation.py`: validate_record() checking company_name non-empty, at least one of email/phone present, email format compliance
-- [ ] T035 [US5] Implement validation integration in `src/pipeline.py`: filter_valid_records() that applies validation to all scraped+enriched records, separates valid from rejected
-- [ ] T036 [US5] Implement rejected row logging in `src/pipeline.py`: writes rejected records with reason to console log (logging.warning) for operational visibility
-- [ ] T037 [US5] Implement validation tests in `tests/test_validation.py`: test empty company_name rejection, missing email+phone rejection, invalid email prefix, valid record pass
+- [X] T034 [US5] Implement row validation in `src/validation.py`: validate_record() checking company_name non-empty, at least one of email/phone present, email format compliance
+- [X] T035 [US5] Implement validation integration in `src/pipeline.py`: filter_valid_records() that applies validation to all scraped+enriched records, separates valid from rejected
+- [X] T036 [US5] Implement rejected row logging in `src/pipeline.py`: writes rejected records with reason to console log (logging.warning) for operational visibility
+- [X] T037 [US5] Implement validation tests in `tests/test_validation.py`: test empty company_name rejection, missing email+phone rejection, invalid email prefix, valid record pass
 
 **Checkpoint**: All user stories should now be independently functional.
 
@@ -139,13 +139,13 @@ description: "Task list for the Lead Prospecting Pipeline feature"
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T038 [P] Implement scheduler entry in `src/scheduler.py`: APScheduler wrapper that runs pipeline on configurable interval, plus cron-compatible main entry
-- [ ] T039 Implement `src/pipeline.py` run_summary(): generate structured summary of rows scraped, enriched, rejected, errors per target
-- [ ] T040 [P] Write console logging throughout pipeline: structured logging per phase with row counts and timing
-- [ ] T041 [P] Implement startup credential check in `src/config.py`: verify GOOGLE_SA_KEY and ENRICH_API_KEY are present and non-empty at import time, exit with clear error message
-- [ ] T042 Implement end-to-end integration test in `tests/test_pipeline.py`: mock all external services, run full pipeline, verify staging tab content and scrape_errors tab
-- [ ] T043 [P] Add docstrings to all public functions across src/ modules
-- [ ] T044 Create top-level `run.py` convenience script: loads .env, calls python -m src with passed args
+- [X] T038 [P] Implement scheduler entry in `src/scheduler.py`: APScheduler wrapper that runs pipeline on configurable interval, plus cron-compatible main entry
+- [X] T039 Implement `src/pipeline.py` run_summary(): generate structured summary of rows scraped, enriched, rejected, errors per target
+- [X] T040 [P] Write console logging throughout pipeline: structured logging per phase with row counts and timing
+- [X] T041 [P] Implement startup credential check in `src/config.py`: verify GOOGLE_SA_KEY and ENRICH_API_KEY are present and non-empty at import time, exit with clear error message
+- [X] T042 Implement end-to-end integration test in `tests/test_pipeline.py`: mock all external services, run full pipeline, verify staging tab content and scrape_errors tab
+- [X] T043 [P] Add docstrings to all public functions across src/ modules
+- [X] T044 Create top-level `run.py` convenience script: loads .env, calls python -m src with passed args
 
 ---
 

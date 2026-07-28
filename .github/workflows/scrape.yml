@@ -60,6 +60,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          mkdir -p dist
+          cp dashboard.html dist/index.html
           npm install -g wrangler
           wrangler pages project create lead-dashboard --production-branch main || true
-          wrangler pages deploy dashboard.html --project-name=lead-dashboard --branch main
+          wrangler pages deploy dist --project-name=lead-dashboard --branch main --commit-dirty=true

@@ -408,7 +408,7 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         "solve_cloudflare": True,
         "load_dom": True,
         "network_idle": True,
-        "capture_xhr": True,
+        "capture_xhr": r".*",
     }
     proxy = fetch_kwargs.get("proxy")
     if proxy:

@@ -105,15 +105,15 @@ tr:hover td { background:#f8fafc; }
     <h1>Lead Prospecting Dashboard</h1>
     <div class="sub">Live aggregated data from Indian business directories</div>
   </div>
-  <div class="badge"><span>&#9679;</span> Jul 29, 2026 at 06:12 PM</div>
+  <div class="badge"><span>&#9679;</span> Jul 29, 2026 at 01:02 PM</div>
 </div>
 
 <div class="cards">
-  <div class="card"><div class="lbl">Total Leads</div><div class="val blue">16</div></div>
-  <div class="card"><div class="lbl">Avg Score</div><div class="val gold">68.4</div></div>
-  <div class="card"><div class="lbl">With Phone</div><div class="val green">15</div></div>
-  <div class="card"><div class="lbl">With Email</div><div class="val purple">12</div></div>
-  <div class="card"><div class="lbl">With Website</div><div class="val red">13</div></div>
+  <div class="card"><div class="lbl">Total Leads</div><div class="val blue">0</div></div>
+  <div class="card"><div class="lbl">Avg Score</div><div class="val gold">0</div></div>
+  <div class="card"><div class="lbl">With Phone</div><div class="val green">0</div></div>
+  <div class="card"><div class="lbl">With Email</div><div class="val purple">0</div></div>
+  <div class="card"><div class="lbl">With Website</div><div class="val red">0</div></div>
 </div>
 
 <div class="controls">
@@ -127,7 +127,7 @@ tr:hover td { background:#f8fafc; }
   </select>
   <select id="srcf" onchange="draw()">
     <option value="">All sources</option>
-    <option value="IndiaMART">IndiaMART (5)</option><option value="Justdial">Justdial (6)</option><option value="TradeIndia">TradeIndia (5)</option>
+    
   </select>
   <select id="hasf" onchange="draw()">
     <option value="">Any fields</option>
@@ -159,7 +159,7 @@ tr:hover td { background:#f8fafc; }
 <div class="foot">Lead Prospecting Pipeline &mdash; Built with Scrapling &amp; SQLite</div>
 
 <script>
-const _data = [{"company_name": "Alpha Digital Solutions", "website": "https://alphadigital.in", "email": "contact@alphadigital.in", "phone": "9899123456", "address": "Banjara Hills, Hyderabad, Telangana", "industry_code": "Digital Marketing", "lead_score": 80, "dedup_key": "alphadigital.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "Apex IT Consulting", "website": "https://apexitc.in", "email": "contact@apexitc.in", "phone": "9000011111", "address": "Ashram, New Delhi", "industry_code": "IT Consultancy", "lead_score": 80, "dedup_key": "apexitc.in", "source_url": "https://www.tradeindia.com/manufacturers/it-consultancy.html", "source": "TradeIndia"}, {"company_name": "CloudBase Technologies", "website": "https://cloudbase.in", "email": "sales@cloudbase.in", "phone": "9911223344", "address": "HITEC City, Hyderabad, Telangana", "industry_code": "Cloud Computing", "lead_score": 80, "dedup_key": "cloudbase.in", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "GreenCode Labs", "website": "https://greencode.in", "email": "team@greencode.in", "phone": "9810098100", "address": "Koramangala, Bengaluru, Karnataka", "industry_code": "Custom Software", "lead_score": 80, "dedup_key": "greencode.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "NexGen IT Solutions", "website": "https://nexgenit.in", "email": "sales@nexgenit.in", "phone": "9812340000", "address": "Electronic City, Bengaluru, Karnataka", "industry_code": "IT Consulting", "lead_score": 80, "dedup_key": "nexgenit.in", "source_url": "https://www.tradeindia.com/manufacturers/it-consultancy.html", "source": "TradeIndia"}, {"company_name": "Synergy Software Pvt Ltd", "website": "https://synergysoft.in", "email": "info@synergysoft.in", "phone": "9312345678", "address": "Lajpat Nagar, New Delhi", "industry_code": "Software Development Services", "lead_score": 80, "dedup_key": "synergysoft.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "TechSol IT Services", "website": "https://techsol.in", "email": "info@techsol.in", "phone": "9876543210", "address": "Sector 62, Noida, Uttar Pradesh", "industry_code": "IT Services", "lead_score": 80, "dedup_key": "techsol.in", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Webify Solutions", "website": "https://webify.in", "email": "contact@webify.in", "phone": "9812345678", "address": "Connaught Place, Delhi", "industry_code": "Software Development", "lead_score": 80, "dedup_key": "webify.in", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "Zeta Consultants", "website": "https://zetaconsult.in", "email": "info@zetaconsult.in", "phone": "9876540987", "address": "Viman Nagar, Pune, Maharashtra", "industry_code": "IT Consultancy", "lead_score": 80, "dedup_key": "zetaconsult.in", "source_url": "https://www.tradeindia.com/manufacturers/it-consultancy.html", "source": "TradeIndia"}, {"company_name": "DataPulse Analytics", "website": "", "email": "hello@datapulse.in", "phone": "9876501234", "address": "MG Road, Bengaluru, Karnataka", "industry_code": "Data Analytics", "lead_score": 60, "dedup_key": "", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "DigitalForge Technologies", "website": "", "email": "info@digitalforge.in", "phone": "9999888777", "address": "Gachibowli, Hyderabad, Telangana", "industry_code": "Software Consulting", "lead_score": 60, "dedup_key": "", "source_url": "https://www.tradeindia.com/manufacturers/it-consultancy.html", "source": "TradeIndia"}, {"company_name": "Orbit Infotech", "website": "", "email": "info@orbitinfotech.in", "phone": "9811111111", "address": "Shivaji Nagar, Pune, Maharashtra", "industry_code": "Web Development", "lead_score": 60, "dedup_key": "", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "NetPro Security", "website": "https://netpro.in", "email": "", "phone": "8765432109", "address": "Andheri East, Mumbai, Maharashtra", "industry_code": "Cybersecurity", "lead_score": 55, "dedup_key": "netpro.in", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}, {"company_name": "PrimeStack Solutions", "website": "https://primestack.in", "email": "", "phone": "9876512345", "address": "Whitefield, Bengaluru, Karnataka", "industry_code": "IT Services", "lead_score": 55, "dedup_key": "primestack.in", "source_url": "https://www.tradeindia.com/manufacturers/it-consultancy.html", "source": "TradeIndia"}, {"company_name": "SafeNet Solutions", "website": "https://safenet.in", "email": "", "phone": "9898989898", "address": "Sahibabad, Ghaziabad, Uttar Pradesh", "industry_code": "Network Security", "lead_score": 55, "dedup_key": "safenet.in", "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html", "source": "IndiaMART"}, {"company_name": "TechSol IT Services Ltd", "website": "https://techsol.in", "email": "", "phone": "", "address": "Sector 62, Noida, UP", "industry_code": "IT Services", "lead_score": 30, "dedup_key": "techsol.in", "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073", "source": "Justdial"}];
+const _data = [];
 function _c(v) { return (v===null||v===undefined||String(v).trim()==='')?'<span class="empt">—</span>':String(v); }
 function _s(src) {
   var cls='src-unknown';

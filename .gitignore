@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .env
-data/
-*.db
+data/leads.db.bak
+data/leads.db-wal
+data/leads.db-shm
+Scrapling/elements_storage.db

@@ -8,6 +8,26 @@ from src.scraper.targets import (
     PARSER_REGISTRY,
     scrape_target,
     parse_example_directory,
+    _is_directory_domain,
+    _extract_emails_from_text,
+    _extract_websites_from_text,
+    _extract_phone_from_html,
+    _clean_phone,
+    _safe_str,
+    _extract_xhr_data,
+    _extract_next_data,
+    _extract_json_ld,
+    _extract_initial_state,
+    _parse_jd_from_xhr,
+    _parse_jd_from_css,
+    _parse_im_from_state,
+    _parse_ti_from_css,
+    _enrich_from_detail_pages,
+    _extract_detail_urls,
+    _jd_page_url,
+    _im_page_url,
+    _ti_page_url,
+    DIRECTORY_DOMAINS,
 )
 
 
@@ -88,7 +108,7 @@ class TestScrapeTarget:
         with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             records = scrape_target(config)
 
-        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=60000)
+        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000, wait=2000)
         assert len(records) == 1
         assert records[0].company_name == "Test Co"
         assert records[0].source_url == "https://dir.example.com"
@@ -112,7 +132,7 @@ class TestScrapeTarget:
         with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             scrape_target(config)
 
-        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000)
+        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000, wait=2000)
 
     def test_parser_receives_response(self):
         PARSER_REGISTRY.clear()
@@ -225,3 +245,438 @@ class TestParseExampleDirectory:
         assert len(records) == 2
         assert records[0].company_name == "Alpha Corp"
         assert records[1].company_name == "Beta Inc"
+
+
+class TestIsDirectoryDomain:
+    def test_directory_domain_returns_true(self):
+        for d in DIRECTORY_DOMAINS:
+            assert _is_directory_domain(d), f"{d} should be directory"
+            assert _is_directory_domain(f"www.{d}"), f"www.{d} should be directory"
+
+    def test_subdomain_returns_true(self):
+        assert _is_directory_domain("listing.justdial.com")
+        assert _is_directory_domain("www.facebook.com")
+
+    def test_non_directory_returns_false(self):
+        assert not _is_directory_domain("acme-corp.com")
+        assert not _is_directory_domain("www.my-consulting.com")
+
+    def test_substring_does_not_false_positive(self):
+        assert not _is_directory_domain("notjustdial.com")
+        assert not _is_directory_domain("mygoogle-consulting.com")
+        assert not _is_directory_domain("facetwitter.net")
+
+    def test_url_with_port_stripped(self):
+        assert _is_directory_domain("justdial.com:8080")
+        assert not _is_directory_domain("acme.com:3000")
+
+
+class TestExtractEmails:
+    def test_finds_single_email(self):
+        assert _extract_emails_from_text("Contact: info@example.com") == ["info@example.com"]
+
+    def test_finds_multiple_emails(self):
+        res = _extract_emails_from_text("a@b.com c@d.co.in")
+        assert len(res) == 2
+
+    def test_empty_text(self):
+        assert _extract_emails_from_text("") == []
+        assert _extract_emails_from_text("No emails here!") == []
+
+
+class TestExtractWebsites:
+    def test_extracts_http_urls(self):
+        res = _extract_websites_from_text('Visit https://acme.com today')
+        assert "https://acme.com" in res
+
+    def test_filters_directory_domains(self):
+        res = _extract_websites_from_text('https://facebook.com https://acme.com')
+        assert "https://acme.com" in res
+        assert "https://facebook.com" not in res
+
+    def test_filters_justdial(self):
+        res = _extract_websites_from_text('https://www.justdial.com/xyz https://real.com')
+        assert "https://real.com" in res
+        assert "https://www.justdial.com/xyz" not in res
+
+    def test_deduplicates_urls(self):
+        res = _extract_websites_from_text('https://acme.com https://acme.com')
+        assert len(res) == 1
+
+    def test_requires_valid_domain(self):
+        assert _extract_websites_from_text("https://a") == []
+        assert _extract_websites_from_text("http://localhost") == []
+
+    def test_empty_text(self):
+        assert _extract_websites_from_text("") == []
+
+
+class TestExtractPhone:
+    def test_indian_mobile(self):
+        phone = _extract_phone_from_html("Call 9876543210 now")
+        assert phone == "9876543210"
+
+    def test_indian_mobile_with_91(self):
+        phone = _extract_phone_from_html("Call +919876543210 now")
+        assert phone == "+919876543210"
+
+    def test_indian_mobile_with_country_code_space(self):
+        phone = _extract_phone_from_html("Call +91 9876543210 now")
+        assert phone is not None
+
+    def test_international_number(self):
+        phone = _extract_phone_from_html("Call +1-555-1234567 now")
+        assert phone is not None and len(phone) >= 10
+
+    def test_landline_with_0_prefix(self):
+        phone = _extract_phone_from_html("Call 011-12345678 now")
+        assert phone is not None and len(phone) >= 10
+
+    def test_rejects_short_numbers(self):
+        assert _extract_phone_from_html("Pin 123456") is None
+
+    def test_rejects_number_within_long_digit_seq(self):
+        assert _extract_phone_from_html("id_98765432101234") is None
+
+    def test_no_phone(self):
+        assert _extract_phone_from_html("Hello world") is None
+
+    def test_empty_html(self):
+        assert _extract_phone_from_html("") is None
+
+
+class TestCleanPhone:
+    def test_clean_indian_mobile(self):
+        assert _clean_phone("9876543210") == "9876543210"
+
+    def test_clean_with_plus(self):
+        assert _clean_phone("+919876543210") == "+919876543210"
+
+    def test_clean_with_dashes(self):
+        assert _clean_phone("987-654-3210") == "9876543210"
+
+    def test_clean_strips_whitespace(self):
+        assert _clean_phone("  9876543210  ") == "9876543210"
+
+    def test_too_short_returns_none(self):
+        assert _clean_phone("123456") is None
+
+    def test_zero_returns_none(self):
+        assert _clean_phone("0") is None
+
+    def test_dash_returns_none(self):
+        assert _clean_phone("-") is None
+
+    def test_empty_returns_none(self):
+        assert _clean_phone("") is None
+        assert _clean_phone("   ") is None
+
+
+class TestSafeStr:
+    def test_none_returns_none(self):
+        assert _safe_str(None) is None
+
+    def test_empty_returns_none(self):
+        assert _safe_str("") is None
+
+    def test_null_string_returns_none(self):
+        assert _safe_str("null") is None
+
+    def test_trims_whitespace(self):
+        assert _safe_str("  hello  ") == "hello"
+
+    def test_truncates_long_strings(self):
+        long = "x" * 5000
+        assert len(_safe_str(long)) <= 1000
+
+    def test_short_string_passes_through(self):
+        assert _safe_str("hello") == "hello"
+
+
+class TestExtractXhrData:
+    def test_no_xhr_returns_none(self):
+        resp = MagicMock()
+        resp.captured_xhr = None
+        assert _extract_xhr_data(resp) is None
+
+    def test_empty_xhr_list_returns_none(self):
+        resp = MagicMock()
+        resp.captured_xhr = []
+        assert _extract_xhr_data(resp) is None
+
+    def test_extracts_from_search_output(self):
+        xhr = MagicMock()
+        xhr.body = b'{"data":{"searchOutput":{"results":[{"name":"Test Corp"}]}}}'
+        xhr.url = "https://www.justdial.com/api/search"
+        resp = MagicMock()
+        resp.captured_xhr = [xhr]
+
+        data = _extract_xhr_data(resp)
+        assert data is not None
+        assert data[0]["name"] == "Test Corp"
+
+    def test_prefers_justdial_api_xhr(self):
+        generic = MagicMock()
+        generic.body = b'{"results":[{"name":"Generic"}]}'
+        generic.url = "https://analytics.com/track"
+
+        jd = MagicMock()
+        jd.body = b'{"data":{"searchOutput":{"results":[{"name":"JD Corp"}]}}}'
+        jd.url = "https://www.justdial.com/api/search"
+
+        resp = MagicMock()
+        resp.captured_xhr = [generic, jd]
+
+        data = _extract_xhr_data(resp)
+        assert data is not None
+        assert data[0]["name"] == "JD Corp"
+
+    def test_falls_back_to_first_xhr_if_no_justdial_match(self):
+        xhr = MagicMock()
+        xhr.body = b'{"results":[{"name":"Fallback Corp"}]}'
+        xhr.url = None
+        resp = MagicMock()
+        resp.captured_xhr = [xhr]
+
+        data = _extract_xhr_data(resp)
+        assert data is not None
+        assert data[0]["name"] == "Fallback Corp"
+
+    def test_skips_non_dict_xhr_body(self):
+        xhr = MagicMock()
+        xhr.body = b'"just a string"'
+        xhr.url = ""
+        resp = MagicMock()
+        resp.captured_xhr = [xhr]
+
+        assert _extract_xhr_data(resp) is None
+
+
+class TestExtractNextData:
+    def test_extracts_valid_json(self):
+        html = '<script id="__NEXT_DATA__" type="application/json">{"key":"value"}</script>'
+        assert _extract_next_data(html) == {"key": "value"}
+
+    def test_no_next_data_returns_none(self):
+        assert _extract_next_data("<html></html>") is None
+
+    def test_malformed_json_returns_none(self):
+        html = '<script id="__NEXT_DATA__" type="application/json">{invalid}</script>'
+        assert _extract_next_data(html) is None
+
+
+class TestExtractJsonLd:
+    def test_extracts_single_block(self):
+        html = '<script type="application/ld+json">{"@type":"LocalBusiness","name":"Test"}</script>'
+        data = _extract_json_ld(html)
+        assert len(data) == 1
+        assert data[0]["name"] == "Test"
+
+    def test_extracts_multiple_blocks(self):
+        html = (
+            '<script type="application/ld+json">{"@type":"LocalBusiness","name":"A"}</script>'
+            '<script type="application/ld+json">{"@type":"Organization","name":"B"}</script>'
+        )
+        assert len(_extract_json_ld(html)) == 2
+
+    def test_skips_malformed_blocks(self):
+        html = (
+            '<script type="application/ld+json">{valid}</script>'
+            '<script type="application/ld+json">{invalid}</script>'
+        )
+        # first is malformed, second is malformed, both skipped
+        data = _extract_json_ld(html)
+        assert len(data) == 0
+
+    def test_no_json_ld_returns_empty(self):
+        assert _extract_json_ld("<html></html>") == []
+
+
+class TestExtractInitialState:
+    def test_extracts_object_state(self):
+        html = '<script>window.__INITIAL_STATE__ = {"data": [1, 2]};</script>'
+        state = _extract_initial_state(html)
+        assert state == {"data": [1, 2]}
+
+    def test_extracts_array_state(self):
+        html = '<script>window.__INITIAL_STATE__ = [{"name": "A"}, {"name": "B"}];</script>'
+        state = _extract_initial_state(html)
+        assert isinstance(state, list)
+        assert len(state) == 2
+
+    def test_extracts_preloaded_state(self):
+        html = '<script>window.__PRELOADED_STATE__ = {"key": "val"};</script>'
+        assert _extract_initial_state(html) == {"key": "val"}
+
+    def test_no_state_returns_none(self):
+        assert _extract_initial_state("<html></html>") is None
+
+    def test_malformed_json_returns_none(self):
+        html = '<script>window.__INITIAL_STATE__ = {bad json};</script>'
+        assert _extract_initial_state(html) is None
+
+
+class TestJustdialParsers:
+    def test_xhr_parser_extracts_all_fields(self):
+        data = [{
+            "name": "Tech Corp",
+            "contactNumber": "9876543210",
+            "address": "123 Street",
+            "area": "Downtown",
+            "city": "Delhi",
+            "type": "IT Services",
+            "website": "https://techcorp.com",
+            "email": "info@techcorp.com",
+        }]
+        records = _parse_jd_from_xhr(data, source_url="https://justdial.com")
+        assert len(records) == 1
+        assert records[0].company_name == "Tech Corp"
+        assert records[0].phone == "9876543210"
+        assert records[0].address == "123 Street, Downtown, Delhi"
+        assert records[0].industry_code == "IT Services"
+        assert records[0].website == "https://techcorp.com"
+        assert records[0].email == "info@techcorp.com"
+
+    def test_xhr_parser_filters_directory_websites(self):
+        data = [{"name": "Dir Co", "website": "https://facebook.com/co"}]
+        records = _parse_jd_from_xhr(data, source_url="")
+        assert records[0].website is None
+
+    def test_xhr_parser_skips_empty_name(self):
+        assert _parse_jd_from_xhr([{"name": ""}], "") == []
+
+    def test_css_parser_skips_missing_name(self):
+        resp = MagicMock()
+        card = MagicMock()
+        sel = MagicMock()
+        sel.first = None
+        card.css.return_value = sel
+        card._root = "<div></div>"
+        resp.css.return_value = [card]
+        records = _parse_jd_from_css(resp, "")
+        assert records == []
+
+
+class TestIndiaMartParsers:
+    def test_state_parser_extracts_records(self):
+        state = {
+            "data": [
+                {"CMP": "Tech Solutions", "ad": "addr1", "city": "Mumbai", "g_s": "MH", "ds": "Software Co"},
+            ],
+        }
+        records = _parse_im_from_state(state, source_url="https://indiamart.com")
+        assert len(records) == 1
+        assert records[0].company_name == "Tech Solutions"
+        assert records[0].address == "addr1, Mumbai, MH"
+        assert records[0].industry_code == "Software Co"
+
+    def test_state_parser_empty_data(self):
+        assert _parse_im_from_state({"data": []}, "") == []
+        assert _parse_im_from_state({}, "") == []
+
+    def test_state_parser_skips_missing_name(self):
+        assert _parse_im_from_state({"data": [{"CMP": ""}]}, "") == []
+
+    def test_state_parser_filters_indiamart_url_in_website(self):
+        state = {
+            "data": [
+                {"CMP": "Co", "s_url": "https://www.indiamart.com/co"},
+            ],
+        }
+        records = _parse_im_from_state(state, "")
+        assert records[0].website is None
+
+    def test_state_parser_allows_external_url(self):
+        state = {
+            "data": [
+                {"CMP": "Co", "s_url": "https://real-site.com"},
+            ],
+        }
+        records = _parse_im_from_state(state, "")
+        assert records[0].website == "https://real-site.com"
+
+
+class TestTradeIndiaParsers:
+    def test_css_parser_extracts_records(self):
+        card = MagicMock()
+        name_el = MagicMock()
+        name_el.text = "Test Company"
+        card.css.side_effect = lambda sel: {
+            ".company-url": type("sel", (), {"first": name_el})(),
+        }.get(sel, type("sel", (), {"first": None})())
+        card.find_all.return_value = []
+        card._root = "<div>Test Company 9876543210</div>"
+
+        resp = MagicMock()
+        resp.css.return_value = [card]
+
+        records = _parse_ti_from_css(resp, source_url="https://tradeindia.com")
+        assert len(records) == 1
+        assert records[0].company_name == "Test Company"
+
+    def test_css_parser_skips_missing_name(self):
+        card = MagicMock()
+        card.css.return_value.first = None
+        card._root = "<div></div>"
+        resp = MagicMock()
+        resp.css.return_value = [card]
+        records = _parse_ti_from_css(resp, "")
+        assert records == []
+
+
+class TestEnrichFromDetailPages:
+    def test_skips_already_enriched(self):
+        rec = RawRecord(company_name="C", phone="1234567890", email="a@b.com")
+        session = MagicMock()
+        targets = [(0, "https://detail.com")]
+        _enrich_from_detail_pages(session, [rec], targets, timeout=30000)
+        session.fetch.assert_not_called()
+
+    def test_merges_missing_fields(self):
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"Contact: 9876543210, info@co.com"
+        session.fetch.return_value = resp
+        records = [rec]
+        targets = [(0, "https://detail.com")]
+        _enrich_from_detail_pages(session, records, targets, timeout=30000)
+        assert records[0].phone == "9876543210"
+        assert records[0].email == "info@co.com"
+
+    def test_preserves_existing_fields_when_detail_has_none(self):
+        """Detail page returns no new data — listing page data preserved."""
+        rec = RawRecord(company_name="C", website="https://orig.com", email="orig@co.com", phone=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"Welcome to our company"
+        session.fetch.return_value = resp
+        targets = [(0, "https://detail.com")]
+        _enrich_from_detail_pages(session, [rec], targets, timeout=30000)
+        assert rec.website == "https://orig.com"
+        assert rec.email == "orig@co.com"
+
+    def test_empty_targets_does_nothing(self):
+        session = MagicMock()
+        _enrich_from_detail_pages(session, [], [], timeout=30000)
+        session.fetch.assert_not_called()
+
+
+class TestBuildPageUrl:
+    def test_jd_page_1_returns_base(self):
+        assert _jd_page_url("https://justdial.com/search", 1) == "https://justdial.com/search"
+
+    def test_jd_page_2_appends_query(self):
+        assert _jd_page_url("https://justdial.com/search", 2) == "https://justdial.com/search?page=2"
+
+    def test_im_page_1_returns_base(self):
+        assert _im_page_url("https://indiamart.com/search", 1) == "https://indiamart.com/search"
+
+    def test_im_page_2_appends_query(self):
+        assert _im_page_url("https://indiamart.com/search", 2) == "https://indiamart.com/search?page=2"
+
+    def test_ti_page_1_returns_base(self):
+        assert _ti_page_url("https://tradeindia.com/search", 1) == "https://tradeindia.com/search"
+
+    def test_ti_page_2_appends_query(self):
+        assert _ti_page_url("https://tradeindia.com/search", 2) == "https://tradeindia.com/search?page=2"

@@ -60,11 +60,6 @@ def build():
         f'<option value="{s}">{s} ({c})</option>'
         for s, c in sorted(source_counts.items())
     )
-    source_cards = "".join(
-        f'<div class="card"><div class="lbl">{s}</div><div class="val blue">{c}</div></div>'
-        for s, c in sorted(source_counts.items(), key=lambda x: -x[1])
-    )
-
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,7 +176,6 @@ tr:hover td {{ background:#f8fafc; }}
   <div class="card"><div class="lbl">With Phone</div><div class="val green">{phones}</div></div>
   <div class="card"><div class="lbl">With Email</div><div class="val purple">{emails}</div></div>
   <div class="card"><div class="lbl">With Website</div><div class="val red">{websites}</div></div>
-  {source_cards}
 </div>
 
 <div class="controls">

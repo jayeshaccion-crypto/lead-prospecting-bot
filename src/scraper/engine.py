@@ -1,6 +1,7 @@
 """Scrape orchestration — iterates targets and delegates to site parsers."""
 
 import logging
+import time
 
 from src.config import load_targets_config
 from src.models import ScrapeError, now_utc
@@ -8,12 +9,14 @@ from src.scraper.targets import scrape_target
 from src.scraper.utils import is_robots_allowed
 
 logger = logging.getLogger(__name__)
+
+
 def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, list[ScrapeError]]:
     """Scrape all configured target sites and aggregate records and errors.
 
     Each target's pages are fetched via a persistent StealthySession (real
     headless browser with Cloudflare solving), and parsed by the registered
-    parser function.
+    parser function. Adds a delay between targets to avoid rate limiting.
 
     Returns:
         A tuple of (all_records, errors).
@@ -24,8 +27,14 @@ def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, 
     all_records = []
     errors = []
 
-    for target in targets_config:
+    for idx, target in enumerate(targets_config):
         url = target.get("entry_url", "")
+        target_delay = target.get("fetch_kwargs", {}).get("target_delay", 5.0)
+
+        if idx > 0:
+            logger.info("Waiting %.1fs before next target...", target_delay)
+            time.sleep(target_delay)
+
         try:
             if not is_robots_allowed(url):
                 logger.warning("Robots.txt disallows scraping %s — skipping", url)

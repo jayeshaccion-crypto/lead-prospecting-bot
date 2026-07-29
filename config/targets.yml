@@ -6,14 +6,18 @@ targets:
     fetch_kwargs:
       timeout: 90000
       max_detail_pages: 15
+      page_delay: 3.0
+      target_delay: 3.0
 
   - name: "IndiaMART"
     entry_url: "https://dir.indiamart.com/new-delhi/software-development-services.html"
     parser: "parse_indiamart"
     pages: 3
     fetch_kwargs:
-      timeout: 90000
+      timeout: 120000
       max_detail_pages: 20
+      page_delay: 5.0
+      target_delay: 5.0
 
   - name: "TradeIndia"
     entry_url: "https://www.tradeindia.com/manufacturers/it-consultancy.html"
@@ -22,3 +26,5 @@ targets:
     fetch_kwargs:
       timeout: 90000
       max_detail_pages: 15
+      page_delay: 2.0
+      target_delay: 3.0

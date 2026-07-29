@@ -3,20 +3,19 @@ name: Clean Database
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Clean DB & rebuild dashboard
-        run: python scripts/cleanup_db.py
-
+      - run: python scripts/cleanup_db.py
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "db: cleanup [skip ci]"
-          file_pattern: dashboard.html
+          file_pattern: dashboard.html data/leads.db

@@ -1,0 +1,58 @@
+name: DB Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Table(s) to clean
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - errors
+          - rejected
+          - leads
+          - reset
+      vacuum:
+        description: Reclaim disk space after delete
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: Preview only — no actual deletes
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run cleanup
+        id: cleanup
+        run: |
+          args="--${{ inputs.target }}"
+          if [[ "${{ inputs.vacuum }}" == "true" ]]; then args="$args --vacuum"; fi
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then args="$args --dry-run"; fi
+          python scripts/cleanup_db.py $args
+
+      - name: Commit cleaned DB
+        if: inputs.dry_run == 'false'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/leads.db
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "db: cleanup ${{ inputs.target }} [skip ci]"
+            git push
+          fi

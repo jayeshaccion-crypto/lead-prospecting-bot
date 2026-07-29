@@ -77,7 +77,7 @@ def flag_invalid_email(email: str | None) -> str | None:
         The trimmed email if valid.
         'UNVERIFIED:<trimmed_email>' if the format is invalid.
     """
-    if not email:
+    if not email or not email.strip():
         return None
     if is_valid_email(email):
         return email.strip()

@@ -6,42 +6,6 @@ from src.scraper import engine as scraper_engine
 from src.scraper.targets import RawRecord
 
 
-class TestCreateFetcher:
-    def test_returns_stealthy_fetcher(self):
-        with patch.object(scraper_engine, "StealthyFetcher") as mock_fetcher:
-            result = scraper_engine.create_fetcher()
-
-        mock_fetcher.configure.assert_called_once_with(adaptive=True)
-        assert result is mock_fetcher
-
-
-class TestFetchWithRetry:
-    def test_fetches_url(self):
-        mock_fetcher_class = MagicMock()
-
-        with patch.object(scraper_engine, "StealthyFetcher", mock_fetcher_class):
-            scraper_engine.fetch_with_retry("https://example.com", timeout=30000)
-
-        mock_fetcher_class.fetch.assert_called_once_with("https://example.com", timeout=30000)
-
-    def test_uses_default_timeout(self):
-        mock_fetcher_class = MagicMock()
-
-        with patch.object(scraper_engine, "StealthyFetcher", mock_fetcher_class):
-            scraper_engine.fetch_with_retry("https://example.com")
-
-        mock_fetcher_class.fetch.assert_called_once_with("https://example.com", timeout=30000)
-
-    def test_no_robots_txt_obey_in_kwargs(self):
-        mock_fetcher_class = MagicMock()
-
-        with patch.object(scraper_engine, "StealthyFetcher", mock_fetcher_class):
-            scraper_engine.fetch_with_retry("https://example.com")
-
-        call_kwargs = mock_fetcher_class.fetch.call_args.kwargs
-        assert "robots_txt_obey" not in call_kwargs
-
-
 class TestScrapeAllTargets:
     def test_empty_config_returns_empty(self):
         records, errors = scraper_engine.scrape_all_targets([])

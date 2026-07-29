@@ -1,8 +1,8 @@
 """Site-specific parsers for Justdial, IndiaMART, and TradeIndia.
 
 Each parser extracts structured listing data from page responses.
-Uses embedded JSON (__NEXT_DATA__, __INITIAL_STATE__) and CSS selectors
-as fallback strategies, extracting all available contact fields.
+Uses embedded JSON (__NEXT_DATA__, __INITIAL_STATE__), CSS selectors,
+find_similar(), and regex-based text extraction as layered strategies.
 """
 
 from dataclasses import dataclass
@@ -47,7 +47,6 @@ def _raw_html(response) -> str:
 
 
 def _extract_next_data(html: str) -> dict | None:
-    """Extract __NEXT_DATA__ JSON from page HTML."""
     m = re.search(
         r'<script\s+id="__NEXT_DATA__"\s+type="application/json">(.*?)</script>',
         html, re.DOTALL,
@@ -61,7 +60,6 @@ def _extract_next_data(html: str) -> dict | None:
 
 
 def _extract_initial_state(html: str) -> dict | None:
-    """Extract window.__INITIAL_STATE__ JSON from page HTML."""
     idx = html.find("window.__INITIAL_STATE__ = ")
     if idx < 0:
         return None
@@ -90,9 +88,40 @@ def _safe_str(val, max_len: int = 500) -> str | None:
     return s[:max_len] if s else None
 
 
+# ---------------------------------------------------------------------------
+# General text-based extraction (works on raw HTML or any text)
+# ---------------------------------------------------------------------------
+
+RFC_5322_LITE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+
+def _extract_emails_from_text(text: str) -> list[str]:
+    """Extract all valid email addresses from any text."""
+    return RFC_5322_LITE.findall(text)
+
+
+def _extract_websites_from_text(text: str) -> list[str]:
+    """Extract likely company website URLs from text.
+
+    Filters out common non-company domains (social media, directories).
+    """
+    urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[-\w/?=&+#]*', text)
+    skip_domains = {
+        "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
+        "youtube.com", "justdial.com", "indiamart.com", "tradeindia.com",
+    }
+    result = []
+    for url in urls:
+        m = re.match(r'https?://([^/]+)', url)
+        if m:
+            domain = m.group(1).lower()
+            domain = domain.removeprefix("www.")
+            if domain not in skip_domains and "." in domain:
+                result.append(url.rstrip("/"))
+    return result
+
+
 def _extract_phone_from_html(html: str) -> str | None:
-    """Extract a phone number from detail page HTML using regex."""
-    # Indian mobile: +91-XXXXXXXXXX or 0XXXXXXXXXX or XXXXXXXXXX
     patterns = [
         r'(?:\+?91[-\s]?)?[6-9]\d{9}',
         r'\+\d{1,3}[-\s]?\d{1,4}[-\s]?\d{6,8}',
@@ -103,17 +132,35 @@ def _extract_phone_from_html(html: str) -> str | None:
             digits = re.sub(r"[^\d+]", "", m.group(0))
             if len(digits) >= 10:
                 return digits[:15]
-    # Landline: 0XXX-XXXXXX
     m = re.search(r'0\d{2,4}[-\s]?\d{6,8}', html)
     if m:
         return re.sub(r"[^\d+]", "", m.group(0))[:15]
     return None
 
 
+# ---------------------------------------------------------------------------
+# find_similar() based card locator — Scrapling's resilience feature
+# ---------------------------------------------------------------------------
+
+def _find_cards_via_similarity(response, example_css: str) -> list:
+    """Use Scrapling's find_similar() to locate all listing cards from one
+    example element found via example_css. Falls back to CSS if similarity
+    finds nothing. This makes parsers resilient to class renames."""
+    example = response.css(example_css).first
+    if example is not None:
+        similar = example.find_similar()
+        if similar:
+            return list(similar)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Detail URL extraction
+# ---------------------------------------------------------------------------
+
 def _extract_detail_urls(
     parser_name: str, response, records: list[RawRecord], base_idx: int,
 ) -> list[tuple[int, str]]:
-    """Extract company profile URLs from the listing page response."""
     urls: list[tuple[int, str]] = []
     if parser_name == "parse_indiamart":
         html = _raw_html(response)
@@ -140,14 +187,30 @@ def _extract_detail_urls(
                 url_idx = base_idx + i
                 if url_idx < len(records):
                     urls.append((url_idx, href))
+    elif parser_name == "parse_justdial":
+        for i, card in enumerate(response.css('[class*="listing-card"], .jf-listing-card')):
+            link_el = card.css("a[href*='justdial.com']").first
+            if link_el is None:
+                continue
+            href = link_el.attrib.get("href", "")
+            if href:
+                full_url = response.urljoin(href) if hasattr(response, "urljoin") else href
+                url_idx = base_idx + i
+                if url_idx < len(records):
+                    urls.append((url_idx, full_url))
     return urls
 
+
+# ---------------------------------------------------------------------------
+# Detail page enrichment — now extracts phone + email + website
+# ---------------------------------------------------------------------------
 
 def _enrich_from_detail_pages(
     session, records: list[RawRecord], targets: list[tuple[int, str]], timeout: int,
 ):
-    """Scrape company profile pages to extract phone numbers.
+    """Scrape company profile pages to extract phone, email, and website.
 
+    Skips records that already have all contact fields (phone + email).
     Uses the same StealthySession if available; otherwise creates one-off fetches.
     """
     should_close = session is None
@@ -161,23 +224,32 @@ def _enrich_from_detail_pages(
             if idx >= len(records):
                 continue
             rec = records[idx]
-            if rec.phone:
+            if rec.phone and rec.email:
                 continue
             try:
                 page_resp = s.fetch(url, wait=1000)
                 html = str(page_resp.html_content)
-                phone = _extract_phone_from_html(html)
-                if phone:
+
+                phone = rec.phone or _extract_phone_from_html(html)
+                emails = _extract_emails_from_text(html)
+                email = rec.email or (emails[0] if emails else None)
+                websites = _extract_websites_from_text(html)
+                website = rec.website or (websites[0] if websites else None)
+
+                if phone != rec.phone or email != rec.email or website != rec.website:
                     records[idx] = RawRecord(
                         company_name=rec.company_name,
-                        website=rec.website,
-                        email=rec.email,
+                        website=website,
+                        email=email,
                         phone=phone,
                         address=rec.address,
                         industry_code=rec.industry_code,
                         source_url=rec.source_url,
                     )
-                    logger.info("Enriched %s -> phone=%s", rec.company_name, phone)
+                    logger.info(
+                        "Enriched %s from detail page -> phone=%s email=%s website=%s",
+                        rec.company_name, phone or "—", email or "—", website or "—",
+                    )
             except Exception as exc:
                 logger.debug("Failed detail page %s for %s: %s", url, rec.company_name, exc)
     finally:
@@ -202,7 +274,6 @@ def _im_page_url(base_url: str, page: int) -> str:
 
 
 def _ti_page_url(base_url: str, page: int) -> str:
-    """TradeIndia pagination is client-side only — only first page works."""
     return base_url
 
 
@@ -213,8 +284,8 @@ def _ti_page_url(base_url: str, page: int) -> str:
 def scrape_target(target_config: dict) -> list[RawRecord]:
     """Scrape a target site across multiple pages and return all records.
 
-    After collecting listing-page records, enriches those without phone/email
-    by scraping individual company profile pages on the source site.
+    After collecting listing-page records, enriches those missing contact
+    info by scraping individual company profile pages on the source site.
     """
     url = target_config["entry_url"]
     parser_name = target_config.get("parser", "")
@@ -255,7 +326,10 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
             except Exception as exc:
                 logger.warning("Failed page %d of %s: %s", page, url, exc)
 
-        needy = [(i, u) for i, u in detail_urls if i < len(all_records) and not all_records[i].phone]
+        needy = [
+            (i, u) for i, u in detail_urls
+            if i < len(all_records) and not (all_records[i].phone and all_records[i].email)
+        ]
         if needy:
             logger.info("Enriching %d records via detail page scraping (max %d)", len(needy), max_detail)
             _enrich_from_detail_pages(session, all_records, needy[:max_detail], timeout)
@@ -275,6 +349,51 @@ def _build_page_url(parser_name: str, base_url: str, page: int) -> str:
     return builder(base_url, page) if builder else base_url
 
 
+# ---------------------------------------------------------------------------
+# Example parser (demo / testing)
+# ---------------------------------------------------------------------------
+
+def parse_example_directory(response, source_url=""):
+    """Example parser implementation for testing and demo."""
+    listings = response.css(".listing")
+    records = []
+    for listing in listings:
+        name_el = listing.css(".company-name").first
+        if name_el is None:
+            continue
+        name = name_el.text.strip() if name_el.text else ""
+        if not name:
+            continue
+
+        website = None
+        website_el = listing.css(".website").first
+        if website_el is not None:
+            website = website_el.attrib.get("href")
+
+        email_el = listing.css(".email").first
+        email = email_el.text.strip() if email_el and email_el.text else None
+
+        phone_el = listing.css(".phone").first
+        phone = phone_el.text.strip() if phone_el and phone_el.text else None
+
+        address_el = listing.css(".address").first
+        address = address_el.text.strip() if address_el and address_el.text else None
+
+        industry_el = listing.css(".industry").first
+        industry = industry_el.text.strip() if industry_el and industry_el.text else None
+
+        records.append(RawRecord(
+            company_name=name,
+            website=website,
+            email=email,
+            phone=phone,
+            address=address,
+            industry_code=industry,
+            source_url=source_url,
+        ))
+    return records
+
+
 # ===================================================================
 # JUSTDIAL PARSER
 # ===================================================================
@@ -283,16 +402,21 @@ def _build_page_url(parser_name: str, base_url: str, page: int) -> str:
 def parse_justdial(response, source_url: str = "") -> list[RawRecord]:
     records = []
 
-    # Strategy 1: Extract from __NEXT_DATA__
+    # Strategy 1: Extract from __NEXT_DATA__ (richest data)
     html = _raw_html(response)
     next_data = _extract_next_data(html)
     if next_data:
-        records = _parse_jd_from_next_data(next_data, source_url)
+        records = _parse_jd_from_next_data(next_data, source_url, response)
 
     if records:
         return records
 
-    # Strategy 2: CSS selectors (fallback for non-JS rendered)
+    # Strategy 2: find_similar() based card detection (resilient to class renames)
+    records = _parse_jd_via_similarity(response, source_url)
+    if records:
+        return records
+
+    # Strategy 3: CSS selectors (fallback for non-JS rendered)
     records = _parse_jd_from_css(response, source_url)
     if records:
         return records
@@ -301,7 +425,7 @@ def parse_justdial(response, source_url: str = "") -> list[RawRecord]:
     return []
 
 
-def _parse_jd_from_next_data(next_data: dict, source_url: str) -> list[RawRecord]:
+def _parse_jd_from_next_data(next_data: dict, source_url: str, response=None) -> list[RawRecord]:
     try:
         pp = next_data.get("props", {}).get("pageProps", {})
         list_data = pp.get("listData", pp.get("listingData", {}))
@@ -314,17 +438,13 @@ def _parse_jd_from_next_data(next_data: dict, source_url: str) -> list[RawRecord
     if not rows:
         return []
 
-    # Build column name -> index map
     col_index = {col: i for i, col in enumerate(columns)} if columns else {}
-    # Also support numeric index access by column position
-    col_by_index = {}
 
     records = []
     for row in rows:
         if not isinstance(row, (list, tuple)):
             continue
 
-        # Helper to get by column name or fallback to index
         def _get(name_or_idx, default=""):
             if isinstance(name_or_idx, str) and name_or_idx in col_index:
                 idx = col_index[name_or_idx]
@@ -343,11 +463,8 @@ def _parse_jd_from_next_data(next_data: dict, source_url: str) -> list[RawRecord
         area = _get("area") or ""
         city = _get("city") or ""
         biz_type = _get("type") or ""
-
-        # Combine address components
         full_address = ", ".join(filter(None, [address, area, city]))
 
-        # Try extracting bd_params misc field (alternate phone)
         bd_raw = _get("bd_params")
         if bd_raw and bd_raw != "null":
             try:
@@ -358,14 +475,29 @@ def _parse_jd_from_next_data(next_data: dict, source_url: str) -> list[RawRecord
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-        # pincode
-        pincode = _get("pincode")
+        email = None
+        website = _get("website") or None
+        if website and website.startswith("www."):
+            website = "https://" + website
 
-        # Rating (for reference)
-        rating = _get("compRating")
+        raw_bd = _get("bd_params", "{}")
+        if raw_bd and raw_bd != "null":
+            try:
+                bd = json.loads(raw_bd) if isinstance(raw_bd, str) else raw_bd
+                cmp = bd.get("cmp_params", {})
+                if not email:
+                    email = cmp.get("email") or None
+                if not website or website.startswith("www."):
+                    w = cmp.get("website") or None
+                    if w:
+                        website = "https://" + w if not w.startswith("http") else w
+            except (json.JSONDecodeError, AttributeError):
+                pass
 
         records.append(RawRecord(
             company_name=name,
+            website=website,
+            email=email,
             phone=_clean_phone(phone) or None,
             address=_safe_str(full_address),
             industry_code=_safe_str(biz_type),
@@ -374,6 +506,70 @@ def _parse_jd_from_next_data(next_data: dict, source_url: str) -> list[RawRecord
 
     if records:
         logger.info("Justdial: extracted %d records from __NEXT_DATA__", len(records))
+    return records
+
+
+def _parse_jd_via_similarity(response, source_url: str) -> list[RawRecord]:
+    """Use Scrapling's find_similar() to discover listing cards from one
+    example card. Resilient to CSS class renames."""
+    html = _raw_html(response)
+    example_selectors = [
+        ".jf-listing-card", "[class*='listing-card']",
+        ".slideshow-listing-card", ".store-card",
+    ]
+    example = None
+    for sel in example_selectors:
+        example = response.css(sel).first
+        if example is not None:
+            break
+
+    if example is None:
+        return []
+
+    similar = example.find_similar()
+    if not similar:
+        return []
+
+    records = []
+    for card in similar:
+        name_text = card.css("::text").get()
+        if not name_text:
+            name_el = card.css("h2, h3, .name, [class*='title'], a").first
+            name_text = name_el.text if name_el is not None else ""
+        name = (name_text or "").strip() if name_text else ""
+        if not name:
+            continue
+
+        card_html = str(card._root) if hasattr(card, "_root") else ""
+        phone = _extract_phone_from_html(card_html) if card_html else None
+        emails = _extract_emails_from_text(card_html) if card_html else []
+        email = emails[0] if emails else None
+        websites = _extract_websites_from_text(card_html) if card_html else []
+        website = None
+        for w in websites:
+            parsed = re.match(r'https?://([^/]+)', w)
+            if parsed and not any(s in parsed.group(1).lower() for s in ["justdial"]):
+                website = w
+                break
+
+        addr_el = card.css("[class*='address'], .address, [class*='addr']").first
+        address = addr_el.text.strip() if addr_el is not None and addr_el.text else ""
+
+        cat_el = card.css("[class*='category'], .category, [class*='cat']").first
+        industry = cat_el.text.strip() if cat_el is not None and cat_el.text else ""
+
+        records.append(RawRecord(
+            company_name=name,
+            website=website,
+            email=email,
+            phone=phone,
+            address=_safe_str(address),
+            industry_code=_safe_str(industry),
+            source_url=source_url,
+        ))
+
+    if records:
+        logger.info("Justdial: extracted %d records via find_similar()", len(records))
     return records
 
 
@@ -396,8 +592,22 @@ def _parse_jd_from_css(response, source_url: str) -> list[RawRecord]:
         cat_el = card.css(".category, .jf-category").first
         category = cat_el.text.strip() if cat_el and cat_el.text else ""
 
+        card_html = str(card._root) if hasattr(card, "_root") else "" if hasattr(card, "html") else ""
+        if not card_html:
+            try:
+                card_html = str(card)
+            except Exception:
+                card_html = ""
+
+        emails = _extract_emails_from_text(card_html)
+        email = emails[0] if not emails else None
+        websites = _extract_websites_from_text(card_html)
+        website = websites[0] if websites else None
+
         records.append(RawRecord(
             company_name=name,
+            website=website,
+            email=email,
             phone=_clean_phone(phone) or None,
             address=_safe_str(address),
             industry_code=_safe_str(category),
@@ -429,12 +639,17 @@ def parse_indiamart(response, source_url: str = "") -> list[RawRecord]:
     html = _raw_html(response)
     state = _extract_initial_state(html)
     if state:
-        records = _parse_im_from_state(state, source_url)
+        records = _parse_im_from_state(state, source_url, response)
 
     if records:
         return records
 
-    # Strategy 2: CSS selectors
+    # Strategy 2: find_similar() based card detection
+    records = _parse_im_via_similarity(response, source_url)
+    if records:
+        return records
+
+    # Strategy 3: CSS selectors
     records = _parse_im_from_css(response, source_url)
     if records:
         return records
@@ -443,13 +658,11 @@ def parse_indiamart(response, source_url: str = "") -> list[RawRecord]:
     return []
 
 
-def _parse_im_from_state(state: dict, source_url: str) -> list[RawRecord]:
-    # Main listing data
+def _parse_im_from_state(state: dict, source_url: str, response=None) -> list[RawRecord]:
     items = state.get("data", [])
     if not items:
         return []
 
-    # Phone numbers from promoted listings
     phone_map = {}
     for ad in state.get("plaWidgetData", []):
         if isinstance(ad, dict):
@@ -475,7 +688,6 @@ def _parse_im_from_state(state: dict, source_url: str) -> list[RawRecord]:
         address = ", ".join(address_parts)
         description = (item.get("ds") or "").strip()
 
-        # s_url is seller profile on IndiaMART, not their own website
         s_url = (item.get("s_url") or "").strip()
         website = None
         if s_url and "indiamart.com" not in s_url:
@@ -491,6 +703,72 @@ def _parse_im_from_state(state: dict, source_url: str) -> list[RawRecord]:
         ))
 
     logger.info("IndiaMART: extracted %d records from __INITIAL_STATE__", len(records))
+    return records
+
+
+def _parse_im_via_similarity(response, source_url: str) -> list[RawRecord]:
+    """Use Scrapling's find_similar() to discover IndiaMART seller cards."""
+    example_selectors = [
+        "li.pCard1", ".card", "[class*='seller-card']",
+        ".list-view", "[class*='listing']",
+    ]
+    example = None
+    for sel in example_selectors:
+        example = response.css(sel).first
+        if example is not None:
+            break
+
+    if example is None:
+        return []
+
+    similar = example.find_similar()
+    if not similar:
+        return []
+
+    records = []
+    for card in similar:
+        name_el = card.css("a, [class*='title'], h2, h3").first
+        name = ""
+        if name_el is not None:
+            name = (name_el.text or "").strip()
+        if not name:
+            continue
+
+        card_html = str(card._root) if hasattr(card, "_root") else ""
+        phone = _extract_phone_from_html(card_html) if card_html else None
+        emails = _extract_emails_from_text(card_html) if card_html else []
+        email = emails[0] if emails else None
+        websites = _extract_websites_from_text(card_html) if card_html else []
+        website = None
+        for w in websites:
+            parsed = re.match(r'https?://([^/]+)', w)
+            if parsed and not any(s in parsed.group(1).lower() for s in ["indiamart"]):
+                website = w
+                break
+
+        link_el = card.css("a[href]").first
+        link_href = link_el.attrib.get("href", "") if link_el is not None else ""
+        if link_href and "indiamart.com" in link_href and not website:
+            website = link_href
+
+        addr_el = card.css("[class*='addr'], .address").first
+        address = addr_el.text.strip() if addr_el is not None and addr_el.text else ""
+
+        desc_el = card.css("[class*='desc'], .ds").first
+        desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+
+        records.append(RawRecord(
+            company_name=name,
+            website=website,
+            email=email,
+            phone=phone,
+            address=_safe_str(address),
+            industry_code=_safe_str(desc, max_len=300),
+            source_url=source_url,
+        ))
+
+    if records:
+        logger.info("IndiaMART: extracted %d records via find_similar()", len(records))
     return records
 
 
@@ -510,7 +788,6 @@ def _parse_im_from_css(response, source_url: str) -> list[RawRecord]:
         desc_el = card.css(".desc, .product-description, .ds").first
         desc = desc_el.text.strip() if desc_el and desc_el.text else ""
 
-        # Phone sometimes in "call now" buttons
         phone = ""
         call_btn = card.css(".viewmno, .call-now, [class*='call']").first
         if call_btn and call_btn.text:
@@ -518,8 +795,21 @@ def _parse_im_from_css(response, source_url: str) -> list[RawRecord]:
             if raw and raw != "Call Now":
                 phone = raw
 
+        card_html = str(card._root) if hasattr(card, "_root") else ""
+        emails = _extract_emails_from_text(card_html) if card_html else []
+        email = emails[0] if emails else None
+        websites = _extract_websites_from_text(card_html) if card_html else []
+        website = None
+        for w in websites:
+            parsed = re.match(r'https?://([^/]+)', w)
+            if parsed and not any(s in parsed.group(1).lower() for s in ["indiamart"]):
+                website = w
+                break
+
         records.append(RawRecord(
             company_name=name,
+            website=website,
+            email=email,
             phone=_clean_phone(phone) or None,
             address=_safe_str(address),
             industry_code=_safe_str(desc, max_len=300),
@@ -535,15 +825,25 @@ def _parse_im_from_css(response, source_url: str) -> list[RawRecord]:
 
 @register_parser("parse_tradeindia")
 def parse_tradeindia(response, source_url: str = "") -> list[RawRecord]:
-    """Parse TradeIndia listing page.
-
-    Two sections:
-      - Company cards (.top-cont) with company name, city, business type
-      - Product cards (.product-info-cnt) with product names/descriptions
-
-    We extract from the company card section for clean company records.
-    """
     records = []
+
+    # Strategy 1: CSS selectors (primary)
+    records = _parse_ti_from_css(response, source_url)
+    if records:
+        return records
+
+    # Strategy 2: find_similar() based card detection
+    records = _parse_ti_via_similarity(response, source_url)
+    if records:
+        return records
+
+    logger.warning("TradeIndia: no listing data found")
+    return []
+
+
+def _parse_ti_from_css(response, source_url: str) -> list[RawRecord]:
+    records = []
+    html = _raw_html(response)
 
     for card in response.css(".top-cont"):
         name_el = card.css(".company-url").first
@@ -563,15 +863,92 @@ def parse_tradeindia(response, source_url: str = "") -> list[RawRecord]:
         if biz_el and biz_el.text:
             biz = biz_el.text.strip()
 
+        card_html = str(card._root) if hasattr(card, "_root") else ""
+        phone = _extract_phone_from_html(card_html) if card_html else None
+        emails = _extract_emails_from_text(card_html) if card_html else []
+        email = emails[0] if emails else None
+        websites = _extract_websites_from_text(card_html) if card_html else []
+        website = None
+        for w in websites:
+            parsed = re.match(r'https?://([^/]+)', w)
+            if parsed and not any(s in parsed.group(1).lower() for s in ["tradeindia"]):
+                website = w
+                break
+
+        link_el = card.css(".company-url").first
+        if link_el is not None:
+            href = link_el.attrib.get("href", "")
+            if href and not website:
+                website = href
+
         records.append(RawRecord(
             company_name=name[:200],
+            website=website,
+            email=email,
+            phone=phone,
             address=_safe_str(city),
             industry_code=_safe_str(biz, max_len=200),
             source_url=source_url,
         ))
 
     if records:
-        logger.info("TradeIndia: extracted %d records from company cards", len(records))
-    else:
-        logger.warning("TradeIndia: no listing data found")
+        logger.info("TradeIndia: extracted %d records from CSS selectors (phone=%d, email=%d, website=%d)",
+                     len(records),
+                     sum(1 for r in records if r.phone),
+                     sum(1 for r in records if r.email),
+                     sum(1 for r in records if r.website))
+    return records
+
+
+def _parse_ti_via_similarity(response, source_url: str) -> list[RawRecord]:
+    """Use Scrapling's find_similar() to discover TradeIndia company cards."""
+    example = response.css(".top-cont").first
+    if example is None:
+        return []
+
+    similar = example.find_similar()
+    if not similar:
+        return []
+
+    records = []
+    for card in similar:
+        name_el = card.css(".company-url, a[href], h2, h3").first
+        name = ""
+        if name_el is not None:
+            name = (name_el.text or "").strip()
+        if not name:
+            continue
+
+        card_html = str(card._root) if hasattr(card, "_root") else ""
+        phone = _extract_phone_from_html(card_html) if card_html else None
+        emails = _extract_emails_from_text(card_html) if card_html else []
+        email = emails[0] if emails else None
+        websites = _extract_websites_from_text(card_html) if card_html else []
+        website = None
+        for w in websites:
+            parsed = re.match(r'https?://([^/]+)', w)
+            if parsed and not any(s in parsed.group(1).lower() for s in ["tradeindia"]):
+                website = w
+                break
+
+        h3s = card.find_all("h3")
+        city = h3s[1].text.strip() if len(h3s) > 1 and h3s[1].text else ""
+
+        biz = ""
+        biz_el = card.css(".business-type, [class*='business']").first
+        if biz_el is not None and biz_el.text:
+            biz = biz_el.text.strip()
+
+        records.append(RawRecord(
+            company_name=name[:200],
+            website=website,
+            email=email,
+            phone=phone,
+            address=_safe_str(city),
+            industry_code=_safe_str(biz, max_len=200),
+            source_url=source_url,
+        ))
+
+    if records:
+        logger.info("TradeIndia: extracted %d records via find_similar()", len(records))
     return records

@@ -2,7 +2,6 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.scraper.engine import fetch_with_retry
 from src.scraper.targets import (
     RawRecord,
     register_parser,
@@ -10,6 +9,7 @@ from src.scraper.targets import (
     scrape_target,
     parse_example_directory,
 )
+
 
 
 class TestRawRecord:
@@ -72,7 +72,7 @@ class TestScrapeTarget:
         with pytest.raises(ValueError, match="Unknown parser: nonexistent"):
             scrape_target(config)
 
-    def test_calls_fetch_with_retry_and_parser(self):
+    def test_calls_session_fetch_and_parser(self):
         PARSER_REGISTRY.clear()
 
         @register_parser("test_parser")
@@ -81,11 +81,14 @@ class TestScrapeTarget:
 
         config = {"entry_url": "https://dir.example.com", "parser": "test_parser"}
         mock_response = MagicMock()
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
 
-        with patch("src.scraper.engine.fetch_with_retry", return_value=mock_response) as mock_fetch:
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             records = scrape_target(config)
 
-        mock_fetch.assert_called_once_with("https://dir.example.com", timeout=30000)
+        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=60000)
         assert len(records) == 1
         assert records[0].company_name == "Test Co"
         assert records[0].source_url == "https://dir.example.com"
@@ -100,13 +103,16 @@ class TestScrapeTarget:
         config = {
             "entry_url": "https://dir.example.com",
             "parser": "test_parser",
-            "fetch_kwargs": {"timeout": 60000},
+            "fetch_kwargs": {"timeout": 90000},
         }
 
-        with patch("src.scraper.engine.fetch_with_retry") as mock_fetch:
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             scrape_target(config)
 
-        mock_fetch.assert_called_once_with("https://dir.example.com", timeout=60000)
+        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000)
 
     def test_parser_receives_response(self):
         PARSER_REGISTRY.clear()
@@ -119,8 +125,11 @@ class TestScrapeTarget:
 
         config = {"entry_url": "https://dir.example.com", "parser": "capture_parser"}
         mock_response = MagicMock()
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
 
-        with patch("src.scraper.engine.fetch_with_retry", return_value=mock_response):
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             scrape_target(config)
 
         assert captured[0][0] is mock_response
@@ -129,29 +138,34 @@ class TestScrapeTarget:
 
 class TestParseExampleDirectory:
     def test_parses_listings(self):
-        def make_mock(value):
-            m = MagicMock()
-            m.get.return_value = value
-            return m
+        def make_element(text_value):
+            el = MagicMock()
+            el.text = text_value
+            return el
+
+        def make_selector(text_value):
+            s = MagicMock()
+            s.first = make_element(text_value) if text_value is not None else None
+            return s
 
         listing = MagicMock()
 
         def listing_css(sel):
             if sel == ".company-name":
-                return make_mock("Acme Corp")
+                return make_selector("Acme Corp")
             elif sel == ".website":
                 w = MagicMock()
                 w.first = MagicMock(attrib={"href": "https://acme.com"})
                 return w
             elif sel == ".email":
-                return make_mock("contact@acme.com")
+                return make_selector("contact@acme.com")
             elif sel == ".phone":
-                return make_mock("+1-555-0100")
+                return make_selector("+1-555-0100")
             elif sel == ".address":
-                return make_mock("123 Main St")
+                return make_selector("123 Main St")
             elif sel == ".industry":
-                return make_mock("Software")
-            return MagicMock()
+                return make_selector("Software")
+            return make_selector(None)
 
         listing.css.side_effect = listing_css
 
@@ -178,19 +192,25 @@ class TestParseExampleDirectory:
     def test_multiple_listings(self):
         def make_listing(name, site, mail):
             def css(sel):
-                m = MagicMock()
-                m.get.return_value = {
-                    ".company-name": name,
-                    ".email": mail,
-                    ".phone": "",
-                    ".address": "",
-                    ".industry": "",
-                }.get(sel, "")
-                if sel == ".website":
+                if sel == ".company-name":
+                    s = MagicMock()
+                    s.first = MagicMock()
+                    s.first.text = name
+                    return s
+                elif sel == ".website":
                     w = MagicMock()
                     w.first = MagicMock(attrib={"href": site})
                     return w
-                return m
+                elif sel == ".email":
+                    s = MagicMock()
+                    s.first = MagicMock()
+                    s.first.text = mail
+                    return s
+                else:
+                    s = MagicMock()
+                    s.first = MagicMock()
+                    s.first.text = ""
+                    return s
             item = MagicMock()
             item.css.side_effect = css
             return item

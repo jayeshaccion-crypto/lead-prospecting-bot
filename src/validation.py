@@ -36,7 +36,7 @@ def validate_record(record: LeadRecord) -> tuple[bool, str | None]:
     if not record.company_name or not record.company_name.strip():
         return (False, "Empty company_name")
 
-    phone = record.phone.strip() if record.phone else None
+    phone = record.phone.strip() if record.phone and record.phone.strip() else None
     if not record.email and not phone:
         return (False, "Missing both email and phone")
 

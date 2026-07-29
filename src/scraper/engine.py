@@ -8,8 +8,6 @@ from src.scraper.targets import scrape_target
 from src.scraper.utils import is_robots_allowed
 
 logger = logging.getLogger(__name__)
-
-
 def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, list[ScrapeError]]:
     """Scrape all configured target sites and aggregate records and errors.
 

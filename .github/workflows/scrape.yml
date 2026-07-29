@@ -9,6 +9,7 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     environment: deploy
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
-          pip install scrapling[all]
+          pip install scrapling[all] httpx
           python -m playwright install chromium
           python -m playwright install-deps chromium
 
@@ -38,6 +39,59 @@ jobs:
 
       - name: Run pipeline
         run: python run.py
+        env:
+          DB_PATH: data/leads.db
+        continue-on-error: true
+
+      - name: Retry IndiaMART on failure (httpx enrichment)
+        if: failure()
+        run: |
+          python -c "
+          import re, httpx, sqlite3, logging
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from scrapling.fetchers import StealthySession
+          from src.scraper.targets import _extract_detail_urls, _extract_phone_from_html, _clean_phone
+
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+          logger = logging.getLogger(__name__)
+
+          conn = sqlite3.connect('data/leads.db')
+          rows = conn.execute(\"SELECT rowid, company_name, phone, email, website FROM Leads WHERE source_url LIKE '%indiamart.com%'\").fetchall()
+          logger.info('IndiaMART records in DB: %d', len(rows))
+          needy = [r for r in rows if not r[2]]
+          if not needy:
+              logger.info('All IndiaMART records already have phone — nothing to enrich')
+              conn.close()
+              exit(0)
+
+          logger.info('Fetching IndiaMART listing page for detail URLs...')
+          with StealthySession(headless=True, solve_cloudflare=True, timeout=90000, load_dom=True, network_idle=True) as session:
+              resp = session.fetch('https://dir.indiamart.com/new-delhi/software-development-services.html', wait=5000)
+              from src.scraper.targets import RawRecord
+              dummy_records = [RawRecord(company_name=str(i)) for i in range(85)]
+              detail_targets = _extract_detail_urls('parse_indiamart', resp, dummy_records, 0)
+
+          logger.info('Got %d detail URLs, enriching with httpx...', len(detail_targets))
+          enriched = 0
+          with httpx.Client(follow_redirects=True, timeout=30, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}) as client:
+              for idx, url in detail_targets:
+                  row = conn.execute('SELECT rowid, company_name, phone, email, website FROM Leads WHERE rowid=?', (needy[idx][0],)).fetchone()
+                  if not row or row[2]:
+                      continue
+                  try:
+                      r = client.get(url)
+                      phones = [re.sub(r'[^\d+]', '', p) for p in re.findall(r'(?<!\d)(?:\+?91[-\s]?)?[6-9]\d{9}(?!\d)', r.text)]
+                      if phones:
+                          conn.execute('UPDATE Leads SET phone=? WHERE rowid=?', (phones[0][:15], row[0]))
+                          conn.commit()
+                          enriched += 1
+                          logger.info('  +phone for %s: %s', row[1], phones[0][:15])
+                  except Exception:
+                      pass
+          conn.close()
+          logger.info('Enriched %d IndiaMART records with phone', enriched)
+          "
         env:
           DB_PATH: data/leads.db
 

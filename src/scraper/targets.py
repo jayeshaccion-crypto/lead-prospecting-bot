@@ -34,8 +34,13 @@ PARSER_REGISTRY: dict[str, callable] = {}
 DIRECTORY_DOMAINS = {
     "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
     "youtube.com", "justdial.com", "indiamart.com", "tradeindia.com",
-    "google.com", "whatsapp.com",
+    "google.com", "whatsapp.com", "googletagmanager.com",
 }
+
+# Site-wide contact values that appear on every page of a directory site
+# Enrichment must reject these — they are not company-specific.
+KNOWN_SITE_WIDE_PHONES: set[str] = {"01146710423"}
+KNOWN_SITE_WIDE_EMAILS: set[str] = {"helpdesk@tradeindia.com"}
 
 
 def register_parser(name: str):
@@ -311,7 +316,8 @@ def _enrich_from_detail_pages(
 
     Preserves the original source_url (listing page) — does NOT overwrite
     it with the detail page URL. Only sets website to external company
-    domains (never directory domains).
+    domains (never directory domains). Rejects known site-wide values
+    (e.g. helpdesk@tradeindia.com, 01146710423) that appear on every page.
     """
     should_close = session is None
     s = session or StealthySession(
@@ -328,13 +334,25 @@ def _enrich_from_detail_pages(
                 continue
             try:
                 page_resp = s.fetch(url, wait=1000)
+                if page_resp.html_content is None:
+                    logger.debug("No body for detail page %s — skipping enrichment", url)
+                    continue
                 html = str(page_resp.html_content)
+                if not html or html.strip() in ("None", ""):
+                    logger.debug("Empty body for detail page %s — skipping enrichment", url)
+                    continue
 
                 detail_phone = _extract_phone_from_html(html)
                 emails = _extract_emails_from_text(html)
                 detail_email = emails[0] if emails else None
                 websites = _extract_websites_from_text(html)
                 detail_website = websites[0] if websites else None
+
+                # Reject known site-wide values that are not company-specific
+                if detail_phone and detail_phone in KNOWN_SITE_WIDE_PHONES:
+                    detail_phone = None
+                if detail_email and detail_email in KNOWN_SITE_WIDE_EMAILS:
+                    detail_email = None
 
                 phone = detail_phone or rec.phone
                 email = detail_email or rec.email

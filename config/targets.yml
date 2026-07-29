@@ -15,9 +15,10 @@ targets:
     pages: 3
     fetch_kwargs:
       timeout: 120000
-      max_detail_pages: 20
-      page_delay: 5.0
-      target_delay: 5.0
+      max_detail_pages: 0         # Browser enrichment fails on IM detail pages (body unreachable);
+                                   # httpx enrichment is done in a separate post-scrape step
+      page_delay: 8.0
+      target_delay: 8.0
 
   - name: "TradeIndia"
     entry_url: "https://www.tradeindia.com/manufacturers/it-consultancy.html"

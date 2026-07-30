@@ -503,20 +503,39 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
     with StealthySession(**session_options) as session:
         for page in range(1, pages + 1):
             page_url = _build_page_url(parser_name, url, page)
-            logger.info("Fetching page %d/%d: %s", page, pages, page_url)
-            try:
-                response = session.fetch(
-                    page_url, timeout=timeout,
-                    wait=max(int(page_delay * 1000), 2000),
-                )
-                records = parser_func(response, source_url=url)
-                all_records.extend(records)
-                logger.info("Page %d: got %d records", page, len(records))
 
-                page_detail_urls = _extract_detail_urls(parser_name, response, all_records, len(all_records) - len(records))
-                detail_urls.extend(page_detail_urls)
-            except Exception as exc:
-                logger.warning("Failed page %d of %s: %s", page, url, exc)
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                logger.info("Fetching page %d/%d (attempt %d/%d): %s", page, pages, attempt + 1, max_attempts, page_url)
+                try:
+                    response = session.fetch(
+                        page_url, timeout=timeout,
+                        wait=max(int(page_delay * 1000), 2000),
+                    )
+                    records = parser_func(response, source_url=url)
+
+                    if records:
+                        all_records.extend(records)
+                        logger.info("Page %d: got %d records", page, len(records))
+                        page_detail_urls = _extract_detail_urls(parser_name, response, all_records, len(all_records) - len(records))
+                        detail_urls.extend(page_detail_urls)
+                        break  # success, move to next page
+
+                    # 0 records — check if rate-limited or transient
+                    status = getattr(response, "status_code", getattr(response, "status", 0))
+                    if status == 429:
+                        wait_sec = 30 * (attempt + 1)
+                        logger.warning("429 rate limit on %s, waiting %ds before retry", page_url, wait_sec)
+                        time.sleep(wait_sec)
+                    else:
+                        logger.info("Empty response from %s (status=%s, attempt %d/%d), retrying...",
+                                     page_url, status, attempt + 1, max_attempts)
+                        if attempt < max_attempts - 1:
+                            time.sleep(5)
+                except Exception as exc:
+                    logger.warning("Failed page %d of %s (attempt %d/%d): %s", page, url, attempt + 1, max_attempts, exc)
+                    if attempt < max_attempts - 1:
+                        time.sleep(10)
 
             if page < pages:
                 time.sleep(page_delay)

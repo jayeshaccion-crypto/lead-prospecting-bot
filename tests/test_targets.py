@@ -118,7 +118,7 @@ class TestScrapeTarget:
 
         @register_parser("test_parser")
         def dummy_parser(response, source_url=""):
-            return []
+            return [RawRecord(company_name="Test Co")]
 
         config = {
             "entry_url": "https://dir.example.com",
@@ -141,7 +141,7 @@ class TestScrapeTarget:
         @register_parser("capture_parser")
         def capture_parser(response, source_url=""):
             captured.append((response, source_url))
-            return []
+            return [RawRecord(company_name="Test Co")]
 
         config = {"entry_url": "https://dir.example.com", "parser": "capture_parser"}
         mock_response = MagicMock()

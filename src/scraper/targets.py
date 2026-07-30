@@ -42,6 +42,16 @@ DIRECTORY_DOMAINS = {
 KNOWN_SITE_WIDE_PHONES: set[str] = {"01146710423"}
 KNOWN_SITE_WIDE_EMAILS: set[str] = {"helpdesk@tradeindia.com"}
 
+# Domains to block in the browser for faster page loads (analytics, tracking, ads)
+BLOCKED_DOMAINS: set[str] = {
+    "doubleclick.net", "googletagmanager.com", "google-analytics.com",
+    "googleadservices.com", "googleads.g.doubleclick.net",
+    "facebook.com", "facebook.net", "connect.facebook.net",
+    "quantserve.com", "scorecardresearch.com", "criteo.com",
+    "hotjar.com", "newrelic.com", "amplitude.com",
+    "batch.com", "pushcrew.com", "onesignal.com",
+}
+
 
 def register_parser(name: str):
     def decorator(func):
@@ -472,6 +482,14 @@ def _ti_page_url(base_url: str, page: int) -> str:
 # scrape_target — entry point
 # ---------------------------------------------------------------------------
 
+async def _scroll_page(page) -> None:
+    """Scroll the page to trigger lazy-loading of listing cards."""
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    except Exception:
+        pass
+
+
 def scrape_target(target_config: dict) -> list[RawRecord]:
     url = target_config["entry_url"]
     parser_name = target_config.get("parser", "")
@@ -480,6 +498,9 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
     pages = target_config.get("pages", 1)
     max_detail = fetch_kwargs.get("max_detail_pages", 15)
     page_delay = fetch_kwargs.get("page_delay", 2.0)
+    wait_selector = fetch_kwargs.get("wait_selector")
+    block_domains = fetch_kwargs.get("blocked_domains")
+    disable_res = fetch_kwargs.get("disable_resources", True)
 
     parser_func = PARSER_REGISTRY.get(parser_name)
     if not parser_func:
@@ -492,6 +513,8 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         "load_dom": True,
         "network_idle": True,
         "capture_xhr": r".*",
+        "disable_resources": disable_res,
+        "blocked_domains": set(BLOCKED_DOMAINS) | (set(block_domains) if block_domains else set()),
     }
     proxy = fetch_kwargs.get("proxy")
     if proxy:
@@ -504,14 +527,26 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         for page in range(1, pages + 1):
             page_url = _build_page_url(parser_name, url, page)
 
+            # Vary wait strategy on retry for transient failures
             max_attempts = 3
             for attempt in range(max_attempts):
                 logger.info("Fetching page %d/%d (attempt %d/%d): %s", page, pages, attempt + 1, max_attempts, page_url)
                 try:
-                    response = session.fetch(
-                        page_url, timeout=timeout,
-                        wait=max(int(page_delay * 1000), 2000),
-                    )
+                    fetch_params = {
+                        "timeout": timeout,
+                        "wait": max(int(page_delay * 1000), 2000),
+                    }
+                    if wait_selector and attempt == 0:
+                        fetch_params["wait_selector"] = wait_selector
+                        fetch_params["wait_selector_state"] = "visible"
+                    if attempt >= 1:
+                        fetch_params["page_action"] = _scroll_page
+                        fetch_params["wait"] = max(int(page_delay * 1000), 3000)
+                    if attempt >= 2:
+                        fetch_params["wait_selector"] = None  # fall back to full wait
+                        fetch_params["wait"] = 8000
+
+                    response = session.fetch(page_url, **fetch_params)
                     records = parser_func(response, source_url=url)
 
                     if records:
@@ -521,7 +556,6 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
                         detail_urls.extend(page_detail_urls)
                         break  # success, move to next page
 
-                    # 0 records — check if rate-limited or transient
                     status = getattr(response, "status_code", getattr(response, "status", 0))
                     if status == 429:
                         wait_sec = 30 * (attempt + 1)
@@ -548,11 +582,24 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
             logger.info("Enriching %d records via detail page scraping (max %d)", len(needy), max_detail)
             _enrich_from_detail_pages(session, all_records, needy[:max_detail], timeout)
 
-    # httpx enrichment fallback for IndiaMART (browser detail pages fail to retrieve body)
     if parser_name == "parse_indiamart":
         _enrich_indiamart_via_httpx(all_records)
 
     return all_records
+
+
+def _save_debug_html(source_url: str, html: str) -> None:
+    """Save raw HTML to disk for debugging when a parser returns no records."""
+    try:
+        from pathlib import Path
+        debug_dir = Path("debug_output")
+        debug_dir.mkdir(exist_ok=True)
+        slug = re.sub(r"[^a-zA-Z0-9]", "_", source_url.split("//")[-1][:60])
+        path = debug_dir / f"{slug}.html"
+        path.write_text(html[:500000], encoding="utf-8")
+        logger.info("Saved debug HTML to %s (%d chars)", path, len(html[:500000]))
+    except Exception as exc:
+        logger.debug("Failed to save debug HTML: %s", exc)
 
 
 def _build_page_url(parser_name: str, base_url: str, page: int) -> str:
@@ -617,19 +664,24 @@ def parse_example_directory(response, source_url=""):
 
 @register_parser("parse_justdial")
 def parse_justdial(response, source_url: str = "") -> list[RawRecord]:
-    """Justdial parser with multi-strategy extraction.
+    """Justdial parser with adaptive find_similar as primary strategy.
 
     Strategy order:
-      1. XHR API data (capture_xhr) — richest, contains all fields
-      2. __NEXT_DATA__ JSON embedded in page
-      3. JSON-LD structured data
-      4. find_similar() card discovery
+      1. find_similar() — adaptive card detection (no hard-coded selectors)
+      2. XHR API data (capture_xhr) — richest, contains all fields
+      3. __NEXT_DATA__ JSON embedded in page
+      4. JSON-LD structured data
       5. CSS selector fallback
       6. Generic text extraction
     """
     records = []
 
-    # Strategy 1: XHR API data (captured via StealthySession capture_xhr)
+    # Strategy 1: find_similar() — Scrapling's adaptive card detection
+    records = _parse_jd_via_similarity(response, source_url)
+    if records:
+        return records
+
+    # Strategy 2: XHR API data (captured via StealthySession capture_xhr)
     xhr_data = _extract_xhr_data(response)
     if xhr_data:
         records = _parse_jd_from_xhr(xhr_data, source_url)
@@ -638,24 +690,19 @@ def parse_justdial(response, source_url: str = "") -> list[RawRecord]:
 
     html = _raw_html(response)
 
-    # Strategy 2: __NEXT_DATA__ JSON
+    # Strategy 3: __NEXT_DATA__ JSON
     next_data = _extract_next_data(html)
     if next_data:
         records = _parse_jd_from_next_data(next_data, source_url)
         if records:
             return records
 
-    # Strategy 3: JSON-LD
+    # Strategy 4: JSON-LD
     ld = _extract_json_ld(html)
     if ld:
         records = _parse_jd_from_json_ld(ld, source_url)
         if records:
             return records
-
-    # Strategy 4: find_similar()
-    records = _parse_jd_via_similarity(response, source_url)
-    if records:
-        return records
 
     # Strategy 5: CSS selectors
     records = _parse_jd_from_css(response, source_url)
@@ -668,6 +715,7 @@ def parse_justdial(response, source_url: str = "") -> list[RawRecord]:
         return records
 
     logger.warning("Justdial: no listing data found via any strategy")
+    _save_debug_html(source_url, html)
     return []
 
 
@@ -853,6 +901,7 @@ def _parse_jd_via_similarity(response, source_url: str) -> list[RawRecord]:
         ".jf-listing-card", "[class*='listing-card']",
         ".slideshow-listing-card", ".store-card",
         "[class*='card'][data-id]", "li[data-id]",
+        "[class*='result']", "[class*='item']", "[class*='list']",
     ]
     cards = _find_cards_via_similarity(response, selectors)
     if not cards:
@@ -862,7 +911,7 @@ def _parse_jd_via_similarity(response, source_url: str) -> list[RawRecord]:
     for card in cards:
         name_text = card.css("::text").get()
         if not name_text:
-            name_el = card.css("h2, h3, .name, [class*='title'], a").first
+            name_el = card.css("h2, h3, .name, [class*='title'], a, strong").first
             name_text = name_el.text if name_el is not None else ""
         name = (name_text or "").strip() if name_text else ""
         if not name:
@@ -875,10 +924,10 @@ def _parse_jd_via_similarity(response, source_url: str) -> list[RawRecord]:
         websites = _extract_websites_from_text(card_html)
         website = websites[0] if websites else None
 
-        addr_el = card.css("[class*='address'], .address, [class*='addr']").first
+        addr_el = card.css("[class*='address'], .address, [class*='addr'], [class*='locality']").first
         address = addr_el.text.strip() if addr_el is not None and addr_el.text else ""
 
-        cat_el = card.css("[class*='category'], .category, [class*='cat']").first
+        cat_el = card.css("[class*='category'], .category, [class*='cat'], [class*='tag']").first
         industry = cat_el.text.strip() if cat_el is not None and cat_el.text else ""
 
         records.append(RawRecord(
@@ -975,17 +1024,16 @@ def _clean_phone(phone: str) -> str | None:
 def parse_indiamart(response, source_url: str = "") -> list[RawRecord]:
     records = []
 
-    # Strategy 1: __INITIAL_STATE__ JSON
+    # Strategy 1: find_similar() — adaptive card detection
+    records = _parse_im_via_similarity(response, source_url)
+    if records:
+        return records
+
+    # Strategy 2: __INITIAL_STATE__ JSON
     html = _raw_html(response)
     state = _extract_initial_state(html)
     if isinstance(state, dict):
         records = _parse_im_from_state(state, source_url)
-
-    if records:
-        return records
-
-    # Strategy 2: find_similar()
-    records = _parse_im_via_similarity(response, source_url)
     if records:
         return records
 
@@ -1000,6 +1048,7 @@ def parse_indiamart(response, source_url: str = "") -> list[RawRecord]:
         return records
 
     logger.warning("IndiaMART: no listing data found")
+    _save_debug_html(source_url, _raw_html(response))
     return []
 
 
@@ -1172,13 +1221,13 @@ def _parse_im_from_text(html: str, source_url: str) -> list[RawRecord]:
 def parse_tradeindia(response, source_url: str = "") -> list[RawRecord]:
     records = []
 
-    # Strategy 1: CSS selectors
-    records = _parse_ti_from_css(response, source_url)
+    # Strategy 1: find_similar() — adaptive card detection
+    records = _parse_ti_via_similarity(response, source_url)
     if records:
         return records
 
-    # Strategy 2: find_similar()
-    records = _parse_ti_via_similarity(response, source_url)
+    # Strategy 2: CSS selectors
+    records = _parse_ti_from_css(response, source_url)
     if records:
         return records
 
@@ -1189,6 +1238,7 @@ def parse_tradeindia(response, source_url: str = "") -> list[RawRecord]:
         return records
 
     logger.warning("TradeIndia: no listing data found")
+    _save_debug_html(source_url, _raw_html(response))
     return []
 
 

@@ -5,9 +5,11 @@ targets:
     pages: 3
     fetch_kwargs:
       timeout: 90000
-      max_detail_pages: 0         # Phones already in __NEXT_DATA__, no emails/websites in API
+      max_detail_pages: 0
       page_delay: 4.0
       target_delay: 3.0
+      disable_resources: true
+      wait_selector: "[class*='listing'], [class*='card'], .jf-listing-card"
 
   - name: "IndiaMART"
     entry_url: "https://dir.indiamart.com/new-delhi/software-development-services.html"
@@ -15,9 +17,11 @@ targets:
     pages: 3
     fetch_kwargs:
       timeout: 120000
-      max_detail_pages: 0         # Browser body retrieval fails; httpx enrichment runs post-scrape
+      max_detail_pages: 0
       page_delay: 8.0
       target_delay: 8.0
+      disable_resources: true
+      wait_selector: ".card, [class*='product'], [class*='listing'], .lcard"
 
   - name: "TradeIndia"
     entry_url: "https://www.tradeindia.com/manufacturers/it-consultancy.html"
@@ -25,6 +29,8 @@ targets:
     pages: 1
     fetch_kwargs:
       timeout: 90000
-      max_detail_pages: 0         # Contact info is JS API only — not available in HTML
+      max_detail_pages: 0
       page_delay: 3.0
       target_delay: 3.0
+      disable_resources: true
+      wait_selector: ".top-cont, [class*='company-card'], .card-list"

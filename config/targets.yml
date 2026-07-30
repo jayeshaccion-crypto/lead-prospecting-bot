@@ -5,8 +5,8 @@ targets:
     pages: 3
     fetch_kwargs:
       timeout: 90000
-      max_detail_pages: 15
-      page_delay: 3.0
+      max_detail_pages: 0         # Phones already in __NEXT_DATA__, no emails/websites in API
+      page_delay: 4.0
       target_delay: 3.0
 
   - name: "IndiaMART"
@@ -15,8 +15,7 @@ targets:
     pages: 3
     fetch_kwargs:
       timeout: 120000
-      max_detail_pages: 0         # Browser enrichment fails on IM detail pages (body unreachable);
-                                   # httpx enrichment is done in a separate post-scrape step
+      max_detail_pages: 0         # Browser body retrieval fails; httpx enrichment runs post-scrape
       page_delay: 8.0
       target_delay: 8.0
 
@@ -26,6 +25,6 @@ targets:
     pages: 1
     fetch_kwargs:
       timeout: 90000
-      max_detail_pages: 15
-      page_delay: 2.0
+      max_detail_pages: 0         # Contact info is JS API only — not available in HTML
+      page_delay: 3.0
       target_delay: 3.0

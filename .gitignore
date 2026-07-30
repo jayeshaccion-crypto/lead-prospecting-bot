@@ -1,7 +1,14 @@
 __pycache__/
 *.pyc
 .env
+data/leads.db
 data/leads.db.bak
 data/leads.db-wal
 data/leads.db-shm
 Scrapling/elements_storage.db
+debug_output/
+run_local.py
+scripts/check_db.py
+scripts/check_jd_data.py
+scripts/diagnose.py
+scripts/enrich_test*.py

@@ -34,7 +34,7 @@ PARSER_REGISTRY: dict[str, callable] = {}
 DIRECTORY_DOMAINS = {
     "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
     "youtube.com", "justdial.com", "indiamart.com", "tradeindia.com",
-    "google.com", "whatsapp.com", "googletagmanager.com",
+    "google.com", "whatsapp.com", "googletagmanager.com", "schema.org",
 }
 
 # Site-wide contact values that appear on every page of a directory site
@@ -382,6 +382,71 @@ def _enrich_from_detail_pages(
 
 
 # ---------------------------------------------------------------------------
+# httpx enrichment fallback for IndiaMART (browser detail pages fail)
+# ---------------------------------------------------------------------------
+
+def _enrich_indiamart_via_httpx(records: list[RawRecord]) -> int:
+    """Enrich IndiaMART records with phone numbers from detail pages via httpx.
+
+    IndiaMART detail pages block browser body retrieval but serve HTML fine
+    to plain httpx requests. This extracts phones from the raw HTML.
+    """
+    needy = [(i, r) for i, r in enumerate(records) if not r.phone]
+    if not needy:
+        return 0
+
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("httpx not available — skipping IndiaMART enrichment")
+        return 0
+
+    # Re-fetch listing page to get detail URLs (avoid storing in session)
+    detail_targets: list[tuple[int, str]] = []
+    try:
+        from scrapling.fetchers import StealthySession
+        with StealthySession(headless=True, solve_cloudflare=True, timeout=60000, load_dom=True, network_idle=True) as s:
+            resp = s.fetch(records[0].source_url or "", wait=3000)
+            detail_targets = _extract_detail_urls("parse_indiamart", resp, records, 0)
+    except Exception as exc:
+        logger.debug("Failed to get IndiaMART detail URLs: %s", exc)
+        return 0
+
+    enriched = 0
+    with httpx.Client(follow_redirects=True, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }) as client:
+        for idx, url in detail_targets:
+            if idx >= len(records):
+                continue
+            rec = records[idx]
+            if rec.phone:
+                continue
+            try:
+                r = client.get(url)
+                phones = re.findall(r"(?<!\d)(?:\+?91[-\s]?)?[6-9]\d{9}(?!\d)", r.text)
+                if phones:
+                    digits = re.sub(r"[^\d+]", "", phones[0])[:15]
+                    records[idx] = RawRecord(
+                        company_name=rec.company_name,
+                        website=rec.website,
+                        email=rec.email,
+                        phone=digits,
+                        address=rec.address,
+                        industry_code=rec.industry_code,
+                        source_url=rec.source_url,
+                    )
+                    enriched += 1
+                    logger.info("httpx enrich: +phone for %s: %s", rec.company_name, digits)
+            except Exception as exc:
+                logger.debug("httpx failed for %s: %s", url, exc)
+
+    if enriched:
+        logger.info("httpx enriched %d IndiaMART records with phone", enriched)
+    return enriched
+
+
+# ---------------------------------------------------------------------------
 # Pagination helpers
 # ---------------------------------------------------------------------------
 
@@ -463,6 +528,10 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         if needy:
             logger.info("Enriching %d records via detail page scraping (max %d)", len(needy), max_detail)
             _enrich_from_detail_pages(session, all_records, needy[:max_detail], timeout)
+
+    # httpx enrichment fallback for IndiaMART (browser detail pages fail to retrieve body)
+    if parser_name == "parse_indiamart":
+        _enrich_indiamart_via_httpx(all_records)
 
     return all_records
 

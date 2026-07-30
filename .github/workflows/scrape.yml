@@ -41,6 +41,9 @@ jobs:
         run: python run.py
         env:
           DB_PATH: data/leads.db
+          WEBSHARE_PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL }}
+          WEBSHARE_API_KEY: ${{ secrets.WEBSHARE_API_KEY }}
+          SCRAPE_FULL_PAGES: ${{ vars.SCRAPE_FULL_PAGES }}
 
       - name: Upload database to R2
         env:

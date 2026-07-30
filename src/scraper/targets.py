@@ -9,13 +9,24 @@ site URLs as company websites.
 from dataclasses import dataclass
 import json
 import logging
+import os
+import random
 import re
+import threading
 import time
 from urllib.parse import urlparse
 
 from scrapling.fetchers import StealthySession
 
 logger = logging.getLogger(__name__)
+
+_TARGET_BYTES: dict[str, int] = {}
+_TARGET_BYTES_LOCK = threading.Lock()
+
+
+def get_target_bytes() -> dict[str, int]:
+    with _TARGET_BYTES_LOCK:
+        return dict(_TARGET_BYTES)
 
 
 @dataclass
@@ -395,7 +406,7 @@ def _enrich_from_detail_pages(
 # httpx enrichment fallback for IndiaMART (browser detail pages fail)
 # ---------------------------------------------------------------------------
 
-def _enrich_indiamart_via_httpx(records: list[RawRecord]) -> int:
+def _enrich_indiamart_via_httpx(records: list[RawRecord], proxy: str | None = None) -> int:
     """Enrich IndiaMART records with phone numbers from detail pages via httpx.
 
     IndiaMART detail pages block browser body retrieval but serve HTML fine
@@ -415,7 +426,10 @@ def _enrich_indiamart_via_httpx(records: list[RawRecord]) -> int:
     detail_targets: list[tuple[int, str]] = []
     try:
         from scrapling.fetchers import StealthySession
-        with StealthySession(headless=True, solve_cloudflare=True, timeout=60000, load_dom=True, network_idle=True) as s:
+        sess_kw = dict(headless=True, solve_cloudflare=True, timeout=60000, load_dom=True, network_idle=True)
+        if proxy:
+            sess_kw["proxy"] = proxy
+        with StealthySession(**sess_kw) as s:
             resp = s.fetch(records[0].source_url or "", wait=3000)
             detail_targets = _extract_detail_urls("parse_indiamart", resp, records, 0)
     except Exception as exc:
@@ -423,9 +437,12 @@ def _enrich_indiamart_via_httpx(records: list[RawRecord]) -> int:
         return 0
 
     enriched = 0
-    with httpx.Client(follow_redirects=True, timeout=30, headers={
+    httpx_kw = dict(follow_redirects=True, timeout=30, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }) as client:
+    })
+    if proxy:
+        httpx_kw["proxy"] = proxy
+    with httpx.Client(**httpx_kw) as client:
         for idx, url in detail_targets:
             if idx >= len(records):
                 continue
@@ -501,6 +518,11 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
     wait_selector = fetch_kwargs.get("wait_selector")
     block_domains = fetch_kwargs.get("blocked_domains")
     disable_res = fetch_kwargs.get("disable_resources", True)
+    proxy = fetch_kwargs.get("proxy")
+
+    # Bandwidth-conscious: default to 1 page unless SCRAPE_FULL_PAGES=true
+    if os.environ.get("SCRAPE_FULL_PAGES", "").lower() != "true":
+        pages = 1
 
     parser_func = PARSER_REGISTRY.get(parser_name)
     if not parser_func:
@@ -516,16 +538,22 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         "disable_resources": disable_res,
         "blocked_domains": BLOCKED_DOMAINS | (set(block_domains) if block_domains else set()),
     }
-    proxy = fetch_kwargs.get("proxy")
     if proxy:
         session_options["proxy"] = proxy
 
     all_records = []
     detail_urls: list[tuple[int, str]] = []
+    bytes_fetched = 0
 
     with StealthySession(**session_options) as session:
         for page in range(1, pages + 1):
             page_url = _build_page_url(parser_name, url, page)
+
+            # IndiaMART: random 8-20s pre-request delay
+            if parser_name == "parse_indiamart":
+                delay = random.uniform(8, 20)
+                logger.info("IndiaMART: waiting %.1fs before request (randomized delay)", delay)
+                time.sleep(delay)
 
             # Vary wait strategy on retry for transient failures
             max_attempts = 3
@@ -547,6 +575,20 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
                         fetch_params["wait"] = 8000
 
                     response = session.fetch(page_url, **fetch_params)
+
+                    # Track bytes and detect blocks
+                    body = getattr(response, "html_content", None) or getattr(response, "text", b"")
+                    if isinstance(body, bytes):
+                        body_size = len(body)
+                    elif isinstance(body, str):
+                        body_size = len(body.encode("utf-8"))
+                    else:
+                        body_size = 0
+                    bytes_fetched += body_size
+
+                    if parser_name == "parse_justdial" and 0 < body_size < 500:
+                        logger.warning("Suspected block despite proxy (body=%d bytes)", body_size)
+
                     records = parser_func(response, source_url=url)
 
                     if records:
@@ -558,8 +600,23 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
 
                     status = getattr(response, "status_code", getattr(response, "status", 0))
                     if status == 429:
-                        wait_sec = 30 * (attempt + 1)
-                        logger.warning("429 rate limit on %s, waiting %ds before retry", page_url, wait_sec)
+                        if parser_name == "parse_indiamart":
+                            headers = (getattr(response, "headers", {}) or {})
+                            ra_header = next(
+                                (v for k, v in headers.items() if k.lower() == "retry-after"),
+                                None,
+                            )
+                            if ra_header:
+                                try:
+                                    wait_sec = int(ra_header)
+                                except (ValueError, TypeError):
+                                    wait_sec = random.uniform(8, 20)
+                            else:
+                                wait_sec = random.uniform(8, 20)
+                            logger.warning("429 on %s, waiting %.1fs before retry (Retry-After=%s)", page_url, wait_sec, ra_header)
+                        else:
+                            wait_sec = 30 * (attempt + 1)
+                            logger.warning("429 rate limit on %s, waiting %ds before retry", page_url, wait_sec)
                         time.sleep(wait_sec)
                     else:
                         logger.info("Empty response from %s (status=%s, attempt %d/%d), retrying...",
@@ -583,8 +640,11 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
             _enrich_from_detail_pages(session, all_records, needy[:max_detail], timeout)
 
     if parser_name == "parse_indiamart":
-        _enrich_indiamart_via_httpx(all_records)
+        _enrich_indiamart_via_httpx(all_records, proxy=proxy)
 
+    with _TARGET_BYTES_LOCK:
+        _TARGET_BYTES[parser_name] = _TARGET_BYTES.get(parser_name, 0) + bytes_fetched
+    logger.info("Target %s: total bytes fetched = %d", parser_name, bytes_fetched)
     return all_records
 
 

@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -728,6 +729,112 @@ class TestBuildPageUrl:
 
     def test_ti_page_2_appends_query(self):
         assert _ti_page_url("https://tradeindia.com/search", 2) == "https://tradeindia.com/search?page=2"
+
+
+class TestPageLimitEnvVar:
+    def test_defaults_to_1_when_env_not_set(self):
+        PARSER_REGISTRY.clear()
+        @register_parser("test_parser")
+        def dummy(response, source_url=""):
+            return [RawRecord(company_name="Co")]
+
+        config = {"entry_url": "https://example.com", "parser": "test_parser", "pages": 5}
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            with patch.dict(os.environ, {}, clear=True):
+                scrape_target(config)
+
+        # Should only fetch 1 page despite config pages=5
+        assert mock_session.fetch.call_count == 1
+
+    def test_uses_config_pages_when_env_is_true(self):
+        PARSER_REGISTRY.clear()
+        @register_parser("test_parser")
+        def dummy(response, source_url=""):
+            return [RawRecord(company_name="Co")]
+
+        config = {"entry_url": "https://example.com", "parser": "test_parser", "pages": 3}
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            with patch.dict(os.environ, {"SCRAPE_FULL_PAGES": "true"}, clear=True):
+                scrape_target(config)
+
+        assert mock_session.fetch.call_count == 3
+
+
+class TestJustdialBodyCheck:
+    def test_warns_when_body_under_500_bytes(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        PARSER_REGISTRY.clear()
+        @register_parser("parse_justdial")
+        def dummy(response, source_url=""):
+            return []
+
+        config = {"entry_url": "https://justdial.com", "parser": "parse_justdial"}
+        mock_response = MagicMock()
+        mock_response.html_content = b"<html>tiny</html>"
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            with patch("src.scraper.targets.time.sleep"):
+                scrape_target(config)
+
+        assert any("Suspected block despite proxy" in msg for msg in caplog.messages)
+
+    def test_no_warning_when_body_over_500_bytes(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        PARSER_REGISTRY.clear()
+        @register_parser("parse_justdial")
+        def dummy(response, source_url=""):
+            return []
+
+        config = {"entry_url": "https://justdial.com", "parser": "parse_justdial"}
+        mock_response = MagicMock()
+        mock_response.html_content = b"x" * 5000
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            with patch("src.scraper.targets.time.sleep"):
+                scrape_target(config)
+
+        assert not any("Suspected block despite proxy" in msg for msg in caplog.messages)
+
+
+class TestIndiamartRetryAfter:
+    def test_parses_retry_after_header_case_insensitive(self):
+        PARSER_REGISTRY.clear()
+        call_count = [0]
+        @register_parser("parse_indiamart")
+        def count_parser(response, source_url=""):
+            call_count[0] += 1
+            return []  # always empty to trigger retry
+
+        config = {"entry_url": "https://indiamart.com", "parser": "parse_indiamart"}
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.headers = {"retry-after": "5"}  # lowercase
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            with patch("src.scraper.targets.time.sleep") as mock_sleep:
+                scrape_target(config)
+
+        # Should have used the Retry-After value (5s), not random
+        sleep_calls = mock_sleep.call_args_list
+        indiamart_sleeps = [c for c in sleep_calls if c[0][0] == 5.0]
+        assert len(indiamart_sleeps) >= 1
 
 
 class TestSaveDebugHtml:

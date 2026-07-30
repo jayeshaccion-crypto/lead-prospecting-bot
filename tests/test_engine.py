@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -152,3 +153,92 @@ class TestScrapeAllTargets:
                 scraper_engine.scrape_all_targets(config)
         warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
         assert any("Failed to scrape https://fail.com" in msg for msg in warning_messages)
+
+
+class TestProxyPool:
+    def setup_method(self):
+        scraper_engine._PROXY_POOL = None
+        scraper_engine._PROXY_INDEX = 0
+
+    def test_init_from_url_env(self):
+        with patch.dict(os.environ, {"WEBSHARE_PROXY_URL": "http://rotating.proxy:80"}, clear=True):
+            scraper_engine._init_proxy_pool()
+            assert scraper_engine._PROXY_POOL == ["http://rotating.proxy:80"]
+
+    def test_init_from_list_env(self):
+        with patch.dict(os.environ, {"WEBSHARE_PROXY_LIST": "http://p1:80,http://p2:80"}, clear=True):
+            scraper_engine._init_proxy_pool()
+            assert scraper_engine._PROXY_POOL == ["http://p1:80", "http://p2:80"]
+
+    def test_init_from_api_key(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "count": 1,
+            "next": None,
+            "results": [
+                {
+                    "id": "d-1",
+                    "username": "u1",
+                    "password": "p1",
+                    "proxy_address": "1.2.3.4",
+                    "port": 8168,
+                    "valid": True,
+                },
+            ],
+        }
+        with patch.dict(os.environ, {"WEBSHARE_API_KEY": "test_key"}, clear=True):
+            with patch("httpx.get", return_value=mock_response):
+                scraper_engine._init_proxy_pool()
+                assert len(scraper_engine._PROXY_POOL) == 1
+                assert "u1:p1@1.2.3.4:8168" in scraper_engine._PROXY_POOL[0]
+
+    def test_init_empty_sets_empty_list(self):
+        with patch.dict(os.environ, {}, clear=True):
+            scraper_engine._init_proxy_pool()
+            assert scraper_engine._PROXY_POOL == []
+
+    def test_get_next_proxy_round_robins(self):
+        scraper_engine._PROXY_POOL = ["http://a:1", "http://b:2"]
+        scraper_engine._PROXY_INDEX = 0
+        assert scraper_engine._get_next_proxy() == "http://a:1"
+        assert scraper_engine._get_next_proxy() == "http://b:2"
+        assert scraper_engine._get_next_proxy() == "http://a:1"
+
+    def test_get_next_proxy_returns_none_when_empty(self):
+        scraper_engine._PROXY_POOL = []
+        assert scraper_engine._get_next_proxy() is None
+
+
+class TestProxySkip:
+    def test_skips_justdial_when_no_proxy(self):
+        config = [{"name": "Justdial", "entry_url": "https://justdial.com", "parser": "p1"}]
+        with patch.object(scraper_engine, "_init_proxy_pool"):
+            with patch.object(scraper_engine, "_PROXY_POOL", []):
+                records, errors = scraper_engine.scrape_all_targets(config)
+        assert records == []
+        assert any(e.error_type == "ProxyNotConfigured" for e in errors)
+
+    def test_skips_indiamart_when_no_proxy(self):
+        config = [{"name": "IndiaMART", "entry_url": "https://indiamart.com", "parser": "p1"}]
+        with patch.object(scraper_engine, "_init_proxy_pool"):
+            with patch.object(scraper_engine, "_PROXY_POOL", []):
+                records, errors = scraper_engine.scrape_all_targets(config)
+        assert records == []
+        assert any(e.error_type == "ProxyNotConfigured" for e in errors)
+
+    def test_does_not_skip_tradeindia_when_no_proxy(self):
+        config = [{"name": "TradeIndia", "entry_url": "https://tradeindia.com", "parser": "p1"}]
+        with patch.object(scraper_engine, "_init_proxy_pool"):
+            with patch.object(scraper_engine, "_PROXY_POOL", []):
+                with patch.object(scraper_engine, "is_robots_allowed", return_value=True):
+                    with patch.object(scraper_engine, "scrape_target", return_value=[]):
+                        records, errors = scraper_engine.scrape_all_targets(config)
+        assert errors == []
+
+    def test_injects_proxy_into_fetch_kwargs(self):
+        config = [{"name": "Justdial", "entry_url": "https://justdial.com", "parser": "p1", "fetch_kwargs": {}}]
+        with patch.object(scraper_engine, "_get_next_proxy", return_value="http://proxy:80"):
+            with patch.object(scraper_engine, "is_robots_allowed", return_value=True):
+                with patch.object(scraper_engine, "scrape_target", return_value=[]):
+                    scraper_engine.scrape_all_targets(config)
+        assert config[0]["fetch_kwargs"]["proxy"] == "http://proxy:80"

@@ -12,3 +12,4 @@ scripts/check_db.py
 scripts/check_jd_data.py
 scripts/diagnose.py
 scripts/enrich_test*.py
+.scrapling_checkpoints/

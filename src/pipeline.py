@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 import time
@@ -101,7 +102,7 @@ def record_to_row(record: LeadRecord) -> list:
     (employee_count, lead_score) are converted to strings.
 
     Returns:
-        A 12-element list matching the sheet column order.
+        A 14-element list matching the sheet column order.
     """
 
     return [
@@ -117,6 +118,8 @@ def record_to_row(record: LeadRecord) -> list:
         record.scraped_at.isoformat() if record.scraped_at else "",
         record.dedup_key or "",
         str(record.lead_score) if record.lead_score is not None else "",
+        json.dumps(record.lead_score_breakdown) if record.lead_score_breakdown else "",
+        record.category_slug or "",
     ]
 
 
@@ -276,6 +279,22 @@ def run_summary(
     }
 
 
+SITE_SOURCE_NAMES: dict[str, str] = {
+    "justdial.com": "Justdial",
+    "indiamart.com": "IndiaMART",
+    "tradeindia.com": "TradeIndia",
+}
+
+
+def _source_name(source_url: str | None) -> str | None:
+    if not source_url:
+        return None
+    for domain, name in SITE_SOURCE_NAMES.items():
+        if domain in source_url:
+            return name
+    return None
+
+
 def raw_record_to_lead(record) -> "LeadRecord":
     """Convert a RawRecord to a LeadRecord with computed dedup_key and timestamp."""
     from urllib.parse import urlparse
@@ -296,6 +315,11 @@ def raw_record_to_lead(record) -> "LeadRecord":
         except Exception:
             dedup_key = web.lower()
 
+    cat_slug = getattr(record, "category_slug", None) or ""
+    city_slug = getattr(record, "city_slug", None) or ""
+    now = now_utc()
+    src_name = _source_name(record.source_url)
+
     return LeadRecord.model_construct(
         company_name=record.company_name,
         website=record.website,
@@ -306,20 +330,57 @@ def raw_record_to_lead(record) -> "LeadRecord":
         employee_count=getattr(record, "employee_count", None),
         revenue_band=getattr(record, "revenue_band", None),
         source_url=record.source_url,
-        scraped_at=now_utc(),
+        scraped_at=now,
         dedup_key=dedup_key,
+        first_seen=now,
+        sources=[src_name] if src_name else None,
+        category_slug=cat_slug or None,
+        city_slug=city_slug or None,
     )
+
+
+def _write_to_neo4j(records: list[LeadRecord]) -> dict:
+    """Write valid records to Neo4j with entity resolution. Returns stats."""
+    try:
+        from src.graphdb.client import ensure_schema, write_companies
+        from src.graphdb import get_driver, close_driver
+        driver = get_driver()
+        ensure_schema(driver)
+        row_dicts = []
+        for r in records:
+            row_dicts.append({
+                "company_name": r.company_name,
+                "website": r.website,
+                "email": r.email,
+                "phone": r.phone,
+                "address": r.address,
+                "industry_code": r.industry_code,
+                "source_url": r.source_url,
+                "city_slug": r.city_slug,
+                "category_slug": r.category_slug,
+                "lead_score": r.lead_score,
+                "lead_score_breakdown": r.lead_score_breakdown,
+            })
+        stats = write_companies(driver, row_dicts)
+        close_driver()
+        return stats
+    except ImportError as exc:
+        logger.error("Neo4j driver not installed: %s", exc)
+        raise
+    except Exception as exc:
+        logger.error("Neo4j write failed: %s", exc)
+        raise
 
 
 def main_pipeline(dry_run: bool = False) -> dict:
     """Run the full lead prospecting pipeline.
 
-    Orchestrates: scrape → enrich → dedup → validate → score → write staging.
+    Orchestrates: scrape → enrich → dedup → validate → score → write staging → Neo4j.
     On non-dry-run, checks failure threshold and promotes to production.
     Logs elapsed time at each phase.
 
     Args:
-        dry_run: If True, writes only to staging tab; skips promotion.
+        dry_run: If True, writes only to staging tab; skips promotion and Neo4j.
 
     Returns:
         Summary dict with pipeline run counts.
@@ -331,6 +392,7 @@ def main_pipeline(dry_run: bool = False) -> dict:
     from src.database.tabs import ensure_all_tabs, write_staging
     from src.scraper.engine import scrape_all_targets
     from src.scoring import score_all_records
+    from src.config import get_icp_categories, get_icp_cities
 
     _start = time.perf_counter()
     logger.info("Pipeline started (dry_run=%s)", dry_run)
@@ -356,7 +418,10 @@ def main_pipeline(dry_run: bool = False) -> dict:
     )
 
     valid_records, invalid_rejected = filter_valid_records(kept)
-    score_all_records(valid_records)
+
+    icp_cats = get_icp_categories()
+    icp_cities_set = get_icp_cities()
+    score_all_records(valid_records, icp_categories=icp_cats, icp_cities=icp_cities_set)
 
     lead_rows = [record_to_row(r) for r in valid_records]
     error_rows = [scrape_error_to_row(e) for e in errors]
@@ -370,6 +435,23 @@ def main_pipeline(dry_run: bool = False) -> dict:
     if rejected_rows:
         write_rejected_duplicates(client, rejected_dups)
 
+    # Neo4j write (skipped on dry-run)
+    neo4j_stats = {"created": 0, "merged_phone": 0, "merged_fuzzy": 0}
+    neo4j_failed = False
+    if not dry_run:
+        try:
+            neo4j_stats = _write_to_neo4j(valid_records)
+            logger.info(
+                "Neo4j: %d created, %d merged (phone=%d, fuzzy=%d)",
+                neo4j_stats["created"],
+                neo4j_stats["merged_phone"] + neo4j_stats["merged_fuzzy"],
+                neo4j_stats["merged_phone"],
+                neo4j_stats["merged_fuzzy"],
+            )
+        except Exception as exc:
+            logger.error("Neo4j write failed entirely: %s", exc)
+            neo4j_failed = True
+
     summary = run_summary(
         raw_count=len(raw_records),
         enriched_count=enriched_count,
@@ -378,10 +460,16 @@ def main_pipeline(dry_run: bool = False) -> dict:
         error_count=len(errors),
         invalid_count=len(invalid_rejected),
     )
+    summary["neo4j_created"] = neo4j_stats.get("created", 0)
+    summary["neo4j_merged"] = neo4j_stats.get("merged_phone", 0) + neo4j_stats.get("merged_fuzzy", 0)
+    summary["neo4j_failed"] = neo4j_failed
     logger.info(
         "Pipeline complete — scraped=%(scraped)d enriched=%(enriched_count)d "
         "kept=%(kept_after_validation)d rejected_dups=%(rejected_duplicates)d "
-        "errors=%(errors)d invalid=%(invalid_records)d (elapsed=%(elapsed).1fs)",
+        "errors=%(errors)d invalid=%(invalid_records)d "
+        "neo4j_created=%(neo4j_created)d neo4j_merged=%(neo4j_merged)d "
+        "neo4j_failed=%(neo4j_failed)s "
+        "(elapsed=%(elapsed).1fs)",
         {**summary, "elapsed": time.perf_counter() - _start},
     )
 

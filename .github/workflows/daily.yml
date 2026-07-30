@@ -1,0 +1,66 @@
+name: Daily Lead Scrape
+
+on:
+  schedule:
+    # 11:30 AM IST = 06:00 UTC (IST is UTC+5:30)
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      DB_PATH: "data/leads.db"
+      TARGETS_CONFIG: "config/targets.yml"
+      SCRAPE_FULL_PAGES: "true"
+      WEBSHARE_PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL || '' }}
+      WEBSHARE_PROXY_LIST: ${{ secrets.WEBSHARE_PROXY_LIST || '' }}
+      WEBSHARE_API_KEY: ${{ secrets.WEBSHARE_API_KEY || '' }}
+      RESIDENTIAL_PROXY_URL_JUSTDIAL: ${{ secrets.RESIDENTIAL_PROXY_URL_JUSTDIAL || '' }}
+      NEO4J_URI: ${{ secrets.NEO4J_URI || '' }}
+      NEO4J_USER: ${{ secrets.NEO4J_USER || '' }}
+      NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD || '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps (curl)
+        run: sudo apt-get update && sudo apt-get install -y curl libcurl4-openssl-dev
+
+      - name: Install Python deps
+        run: pip install --upgrade pip && pip install -e "."
+
+      - name: Pin neo4j driver
+        run: pip install neo4j==5.20.0
+
+      - name: Run pipeline
+        run: python -m src --pipeline 2>&1
+
+      - name: Build dashboard
+        run: python build_dashboard.py 2>&1
+
+      - name: Upload debug output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-output
+          path: debug_output/
+          retention-days: 7
+
+      - name: Upload dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard
+          path: dashboard.html
+          retention-days: 7

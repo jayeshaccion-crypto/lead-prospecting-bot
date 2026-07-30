@@ -482,10 +482,10 @@ def _ti_page_url(base_url: str, page: int) -> str:
 # scrape_target — entry point
 # ---------------------------------------------------------------------------
 
-async def _scroll_page(page) -> None:
+def _scroll_page(page) -> None:
     """Scroll the page to trigger lazy-loading of listing cards."""
     try:
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     except Exception:
         pass
 
@@ -514,7 +514,7 @@ def scrape_target(target_config: dict) -> list[RawRecord]:
         "network_idle": True,
         "capture_xhr": r".*",
         "disable_resources": disable_res,
-        "blocked_domains": set(BLOCKED_DOMAINS) | (set(block_domains) if block_domains else set()),
+        "blocked_domains": BLOCKED_DOMAINS | (set(block_domains) if block_domains else set()),
     }
     proxy = fetch_kwargs.get("proxy")
     if proxy:
@@ -595,7 +595,7 @@ def _save_debug_html(source_url: str, html: str) -> None:
         debug_dir = Path("debug_output")
         debug_dir.mkdir(exist_ok=True)
         slug = re.sub(r"[^a-zA-Z0-9]", "_", source_url.split("//")[-1][:60])
-        path = debug_dir / f"{slug}.html"
+        path = debug_dir / f"{slug}_{int(time.time())}.html"
         path.write_text(html[:500000], encoding="utf-8")
         logger.info("Saved debug HTML to %s (%d chars)", path, len(html[:500000]))
     except Exception as exc:
@@ -917,7 +917,7 @@ def _parse_jd_via_similarity(response, source_url: str) -> list[RawRecord]:
         if not name:
             continue
 
-        card_html = str(card._root) if hasattr(card, "_root") else ""
+        card_html = str(card)
         phone = _extract_phone_from_html(card_html) if card_html else None
         emails = _extract_emails_from_text(card_html)
         email = emails[0] if emails else None
@@ -1119,7 +1119,7 @@ def _parse_im_via_similarity(response, source_url: str) -> list[RawRecord]:
         if not name:
             continue
 
-        card_html = str(card._root) if hasattr(card, "_root") else ""
+        card_html = str(card)
         phone = _extract_phone_from_html(card_html) if card_html else None
         emails = _extract_emails_from_text(card_html)
         email = emails[0] if emails else None
@@ -1252,7 +1252,7 @@ def _parse_ti_from_css(response, source_url: str) -> list[RawRecord]:
         if not name:
             continue
 
-        h3s = card.find_all("h3")
+        h3s = card.css("h3")
         city = h3s[1].text.strip() if len(h3s) > 1 and h3s[1].text else ""
 
         biz = ""
@@ -1262,7 +1262,7 @@ def _parse_ti_from_css(response, source_url: str) -> list[RawRecord]:
         if biz_el and biz_el.text:
             biz = biz_el.text.strip()
 
-        card_html = str(card._root) if hasattr(card, "_root") else ""
+        card_html = str(card)
         phone = _extract_phone_from_html(card_html) if card_html else None
         emails = _extract_emails_from_text(card_html)
         email = emails[0] if emails else None
@@ -1303,14 +1303,14 @@ def _parse_ti_via_similarity(response, source_url: str) -> list[RawRecord]:
         if not name:
             continue
 
-        card_html = str(card._root) if hasattr(card, "_root") else ""
+        card_html = str(card)
         phone = _extract_phone_from_html(card_html) if card_html else None
         emails = _extract_emails_from_text(card_html)
         email = emails[0] if emails else None
         websites = _extract_websites_from_text(card_html)
         website = websites[0] if websites else None
 
-        h3s = card.find_all("h3")
+        h3s = card.css("h3")
         city = h3s[1].text.strip() if len(h3s) > 1 and h3s[1].text else ""
 
         biz = ""

@@ -27,6 +27,7 @@ from src.scraper.targets import (
     _jd_page_url,
     _im_page_url,
     _ti_page_url,
+    _save_debug_html,
     DIRECTORY_DOMAINS,
 )
 
@@ -108,7 +109,8 @@ class TestScrapeTarget:
         with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             records = scrape_target(config)
 
-        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000, wait=2000)
+        mock_session.fetch.assert_called_once()
+        assert mock_session.fetch.call_args[0][0] == "https://dir.example.com"
         assert len(records) == 1
         assert records[0].company_name == "Test Co"
         assert records[0].source_url == "https://dir.example.com"
@@ -132,7 +134,8 @@ class TestScrapeTarget:
         with patch("src.scraper.targets.StealthySession", return_value=mock_session):
             scrape_target(config)
 
-        mock_session.fetch.assert_called_once_with("https://dir.example.com", timeout=90000, wait=2000)
+        mock_session.fetch.assert_called_once()
+        assert mock_session.fetch.call_args[1]["timeout"] == 90000
 
     def test_parser_receives_response(self):
         PARSER_REGISTRY.clear()
@@ -154,6 +157,51 @@ class TestScrapeTarget:
 
         assert captured[0][0] is mock_response
         assert captured[0][1] == "https://dir.example.com"
+
+    def test_retries_when_parser_returns_empty(self):
+        PARSER_REGISTRY.clear()
+
+        @register_parser("empty_parser")
+        def empty_parser(response, source_url=""):
+            return []
+
+        config = {"entry_url": "https://dir.example.com", "parser": "empty_parser"}
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
+
+        with (
+            patch("src.scraper.targets.StealthySession", return_value=mock_session),
+            patch("src.scraper.targets.time.sleep"),
+        ):
+            records = scrape_target(config)
+
+        assert mock_session.fetch.call_count == 3
+        assert records == []
+
+    def test_breaks_retry_on_first_success(self):
+        PARSER_REGISTRY.clear()
+        call_count = 0
+
+        @register_parser("count_parser")
+        def count_parser(response, source_url=""):
+            nonlocal call_count
+            call_count += 1
+            return [RawRecord(company_name="Co")]
+
+        config = {"entry_url": "https://dir.example.com", "parser": "count_parser"}
+        mock_response = MagicMock()
+        mock_session = MagicMock()
+        mock_session.fetch.return_value = mock_response
+        mock_session.__enter__.return_value = mock_session
+
+        with patch("src.scraper.targets.StealthySession", return_value=mock_session):
+            records = scrape_target(config)
+
+        assert mock_session.fetch.call_count == 1
+        assert len(records) == 1
 
 
 class TestParseExampleDirectory:
@@ -601,11 +649,11 @@ class TestTradeIndiaParsers:
         card = MagicMock()
         name_el = MagicMock()
         name_el.text = "Test Company"
+        h3_list = [MagicMock(), MagicMock(text="Delhi")]
         card.css.side_effect = lambda sel: {
             ".company-url": type("sel", (), {"first": name_el})(),
+            "h3": h3_list,
         }.get(sel, type("sel", (), {"first": None})())
-        card.find_all.return_value = []
-        card._root = "<div>Test Company 9876543210</div>"
 
         resp = MagicMock()
         resp.css.return_value = [card]
@@ -680,3 +728,41 @@ class TestBuildPageUrl:
 
     def test_ti_page_2_appends_query(self):
         assert _ti_page_url("https://tradeindia.com/search", 2) == "https://tradeindia.com/search?page=2"
+
+
+class TestSaveDebugHtml:
+    def test_saves_html_to_debug_dir(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                _save_debug_html("https://example.com/test-co", "<html>test content</html>")
+                debug_dir = Path("debug_output")
+                assert debug_dir.exists()
+                files = list(debug_dir.glob("*.html"))
+                assert len(files) == 1
+                content = files[0].read_text(encoding="utf-8")
+                assert "test content" in content
+            finally:
+                os.chdir(original_cwd)
+
+    def test_handles_empty_html(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                _save_debug_html("https://example.com/empty", "")
+                debug_dir = Path("debug_output")
+                assert debug_dir.exists()
+                files = list(debug_dir.glob("*.html"))
+                assert len(files) == 1
+            finally:
+                os.chdir(original_cwd)

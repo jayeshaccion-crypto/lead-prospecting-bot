@@ -64,8 +64,25 @@ Pipeline runs on cron `0 6 * * 1` (every Monday 06:00 UTC). The pipeline is idem
 - Staging tab holds dry-run output for every run.
 - `linkedin_manual` tab holds manually imported LinkedIn data, matched by `dedup_key`.
 
+## Knowledge Graph Grounding
+
+### VI. CodeGraph-First Retrieval (NON-NEGOTIABLE)
+Before writing any spec, plan, task, or code, the agent MUST query CodeGraph for the relevant module/entity context (callers, callees, impact scope). Blind file scanning is not permitted when indexed symbols exist. If CodeGraph returns no results for a named symbol, the agent may fall back to file search and flag the gap in the Known Gaps section of the Knowledge Graph.
+
+### VII. CONTEXT USED Declaration
+Every non-trivial output MUST open with a `CONTEXT USED / ASSUMPTIONS / OUT OF SCOPE` block naming which KG entities, contracts, and business rules were consulted. If information was missing and had to be assumed, the assumption MUST be scored per the Confidence scale (100%/90%/75%/50%/<50%) and logged in the Assumption Register.
+
+### VIII. Scope-Fidelity Enforcement
+Any `/plan` or `/tasks` output that would touch code outside the declared scope — as determined by CodeGraph's impact analysis — MUST be flagged explicitly. Scope creep must be called out, not silently absorbed.
+
+### IX. Knowledge Graph Authoritative
+The Knowledge Graph (`KNOWLEDGE_GRAPH.md`) is the authoritative source of project entities, contracts, and business rules. If it is missing information needed for a task, the agent MUST stop and ask rather than inventing entities, business rules, or contracts. Guesses in the KG's Known Gaps section are acceptable only if labelled as unverified.
+
+### X. Reproducibility Statement
+Every substantial response MUST end with: `Reproducible: Yes/No — <reason>.` A "Yes" means another engineer with the same KG and same input would get materially the same output. "No" means judgment calls were made that a human should review.
+
 ## Governance
 
 This constitution supersedes all other development guidance for the Lead Prospecting Bot project. Amendments require a documented proposal, approval, and a migration plan for existing behavior. Every pull request and review MUST verify compliance with these principles. Complexity deviations from these principles MUST be justified in writing.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-28 | **Last Amended**: 2026-07-28
+**Version**: 1.1.0 | **Ratified**: 2026-07-28 | **Last Amended**: 2026-07-30

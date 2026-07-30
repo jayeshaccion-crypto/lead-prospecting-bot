@@ -78,10 +78,34 @@ def main():
     conn.close()
     logger.info("Written %d records to Leads table (%.1fs)", count, time.perf_counter() - start)
 
-    # 4. Build dashboard
+    # 4. Write to Neo4j graph database
+    try:
+        import neo4j
+        from src.graphdb.client import upsert_company
+        from src.graphdb import get_driver, close_driver
+        driver = get_driver()
+        for row in lead_rows:
+            row_dict = dict(zip(lead_columns(), row))
+            upsert_company(driver, row_dict)
+        close_driver()
+        logger.info("Written %d records to Neo4j", len(lead_rows))
+    except Exception as exc:
+        logger.warning("Neo4j write skipped (%s)", exc)
+
+    # 5. Build dashboard
     import build_dashboard
     build_dashboard.build()
-    logger.info("Dashboard rebuilt (total %.1fs)", time.perf_counter() - start)
+    graph_stats = "--"
+    try:
+        from src.graphdb import get_driver
+        d = get_driver()
+        from src.graphdb.client import get_stats
+        s = get_stats(d)
+        graph_stats = f"{s['Company']}C {s['Phone']}P {s['Email']}E"
+        d.close()
+    except Exception:
+        pass
+    logger.info("Dashboard rebuilt | Neo4j: %s (total %.1fs)", graph_stats, time.perf_counter() - start)
 
 
 if __name__ == "__main__":

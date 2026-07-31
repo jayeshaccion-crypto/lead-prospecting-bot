@@ -47,3 +47,23 @@ class TestRetiredGateHygiene:
                 candidates.append(path)
         for py in candidates:
             assert "SCRAPE_FULL_PAGES" not in py.read_text(encoding="utf-8"), py
+
+
+class TestDeployRetry:
+    """Deploy steps retry transient Cloudflare API errors (522 / 10500) instead of hard-failing."""
+
+    def test_deploy_steps_retry_wrangler(self):
+        for name in ("scrape.yml", "cleanup.yml"):
+            text = _read(name)
+            assert "until wrangler pages deploy" in text, name
+            assert "attempt/$retries" in text, name
+            assert 'exit 1' in text, name
+
+
+class TestDeployEnvironmentSecrets:
+    """All workflows that read deploy-environment secrets must opt into it via environment: deploy."""
+
+    def test_all_secret_consuming_jobs_opt_into_deploy_environment(self):
+        for name in ("daily.yml", "scrape.yml", "cleanup.yml"):
+            text = _read(name)
+            assert "environment: deploy" in text, name

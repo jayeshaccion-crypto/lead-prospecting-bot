@@ -436,7 +436,8 @@ class TestWriteStaging:
         assert args[0] == "staging"
         expected_header = ["company_name", "website", "email", "phone", "address",
                            "industry_code", "employee_count", "revenue_band",
-                           "source_url", "scraped_at", "dedup_key", "lead_score"]
+                           "source_url", "scraped_at", "dedup_key", "lead_score",
+                           "lead_score_breakdown", "city_slug"]
         assert args[1][0] == expected_header
         assert args[1][1] == ["Acme", "acme.com"]
 

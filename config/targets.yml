@@ -1,8 +1,10 @@
 targets:
   - name: "Justdial"
+    enabled: false
     entry_url: "https://www.justdial.com/Delhi/IT-Services/nct-10278073"
     parser: "parse_justdial"
     pages: 3
+    max_requests_per_day: 40
     fetch_kwargs:
       timeout: 90000
       max_detail_pages: 0
@@ -12,9 +14,10 @@ targets:
       wait_selector: "[class*='listing'], [class*='card'], .jf-listing-card"
 
   - name: "IndiaMART"
-    entry_url: "https://dir.indiamart.com/new-delhi/software-development-services.html"
+    enabled: true
     parser: "parse_indiamart"
     pages: 3
+    max_requests_per_day: 40
     fetch_kwargs:
       timeout: 120000
       max_detail_pages: 0
@@ -24,13 +27,130 @@ targets:
       wait_selector: ".card, [class*='product'], [class*='listing'], .lcard"
 
   - name: "TradeIndia"
-    entry_url: "https://www.tradeindia.com/manufacturers/it-consultancy.html"
+    enabled: true
     parser: "parse_tradeindia"
     pages: 1
+    max_requests_per_day: 100
     fetch_kwargs:
       timeout: 90000
-      max_detail_pages: 0
+      max_detail_pages: 20
       page_delay: 3.0
       target_delay: 3.0
       disable_resources: true
       wait_selector: ".top-cont, [class*='company-card'], .card-list"
+
+expansion:
+  categories:
+    - slug: software-development
+      labels:
+        justdial: "IT-Services"
+        indiamart: "software-development-services"
+        tradeindia: "software-development"
+    - slug: web-design
+      labels:
+        justdial: "Web-Design"
+        indiamart: "web-design-services"
+        tradeindia: "web-design"
+    - slug: app-development
+      labels:
+        justdial: "App-Development"
+        indiamart: "app-development-services"
+        tradeindia: "app-development"
+    - slug: it-consultancy
+      labels:
+        justdial: "IT-Consultancy"
+        indiamart: "it-consultancy-services"
+        tradeindia: "it-consultancy"
+    - slug: digital-marketing
+      labels:
+        justdial: "Digital-Marketing"
+        indiamart: "digital-marketing-services"
+        tradeindia: "digital-marketing"
+    - slug: cloud-services
+      labels:
+        justdial: "Cloud-Services"
+        indiamart: "cloud-computing-services"
+        tradeindia: "cloud-computing"
+    - slug: seo-services
+      labels:
+        justdial: "SEO-Services"
+        indiamart: "seo-services"
+        tradeindia: "seo-services"
+    - slug: erp-solutions
+      labels:
+        justdial: "ERP-Solutions"
+        indiamart: "erp-software-solutions"
+        tradeindia: "erp-software"
+    - slug: cybersecurity
+      labels:
+        justdial: "Cyber-Security"
+        indiamart: "cyber-security-services"
+        tradeindia: "cyber-security"
+    - slug: data-analytics
+      labels:
+        justdial: "Data-Analytics"
+        indiamart: "data-analytics-services"
+        tradeindia: "data-analytics"
+
+  cities:
+    - slug: new-delhi
+      labels:
+        justdial: "Delhi"
+        indiamart: "new-delhi"
+    - slug: mumbai
+      labels:
+        justdial: "Mumbai"
+        indiamart: "mumbai"
+    - slug: bangalore
+      labels:
+        justdial: "Bangalore"
+        indiamart: "bangalore"
+    - slug: pune
+      labels:
+        justdial: "Pune"
+        indiamart: "pune"
+    - slug: hyderabad
+      labels:
+        justdial: "Hyderabad"
+        indiamart: "hyderabad"
+    - slug: chennai
+      labels:
+        justdial: "Chennai"
+        indiamart: "chennai"
+    - slug: kolkata
+      labels:
+        justdial: "Kolkata"
+        indiamart: "kolkata"
+    - slug: ahmedabad
+      labels:
+        justdial: "Ahmedabad"
+        indiamart: "ahmedabad"
+    - slug: jaipur
+      labels:
+        justdial: "Jaipur"
+        indiamart: "jaipur"
+    - slug: surat
+      labels:
+        justdial: "Surat"
+        indiamart: "surat"
+
+url_templates:
+  justdial: "https://www.justdial.com/{city}/{category}/nct-10278073"
+  indiamart: "https://dir.indiamart.com/{city}/{category}.html"
+  tradeindia: "https://www.tradeindia.com/manufacturers/{category}.html"
+
+icp:
+  categories:
+    - software-development
+    - web-design
+    - app-development
+    - it-consultancy
+    - digital-marketing
+    - cloud-services
+  cities:
+    - new-delhi
+    - mumbai
+    - bangalore
+    - pune
+    - hyderabad
+    - chennai

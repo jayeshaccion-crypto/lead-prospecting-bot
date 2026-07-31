@@ -7,7 +7,8 @@ logger = logging.getLogger(__name__)
 LEADS_HEADERS = [
     "company_name", "website", "email", "phone", "address",
     "industry_code", "employee_count", "revenue_band", "source_url",
-    "scraped_at", "dedup_key", "lead_score",
+    "scraped_at", "dedup_key", "lead_score", "lead_score_breakdown",
+    "city_slug",
 ]
 
 SCRAPE_ERRORS_HEADERS = ["url", "timestamp", "error_type"]

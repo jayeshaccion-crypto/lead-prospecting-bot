@@ -201,13 +201,15 @@ class TestRecordToRow:
             TIP.isoformat(),
             "acme.com",
             "80",
+            "",
+            "",
         ]
 
     def test_minimal_fields(self):
         r = LeadRecord(company_name="Minimal")
         row = record_to_row(r)
         assert row == [
-            "Minimal", "", "", "", "", "", "", "", "", "", "", "",
+            "Minimal", "", "", "", "", "", "", "", "", "", "", "", "", "",
         ]
 
     def test_zero_employee_count_renders_as_string_zero(self):

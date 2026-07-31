@@ -9,24 +9,13 @@ site URLs as company websites.
 from dataclasses import dataclass
 import json
 import logging
-import os
-import random
 import re
-import threading
 import time
 from urllib.parse import urlparse
 
 from scrapling.fetchers import StealthySession
 
 logger = logging.getLogger(__name__)
-
-_TARGET_BYTES: dict[str, int] = {}
-_TARGET_BYTES_LOCK = threading.Lock()
-
-
-def get_target_bytes() -> dict[str, int]:
-    with _TARGET_BYTES_LOCK:
-        return dict(_TARGET_BYTES)
 
 
 @dataclass
@@ -496,156 +485,8 @@ def _ti_page_url(base_url: str, page: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# scrape_target — entry point
+# (Entry point is now LeadSpider in spider.py — this module provides parsers)
 # ---------------------------------------------------------------------------
-
-def _scroll_page(page) -> None:
-    """Scroll the page to trigger lazy-loading of listing cards."""
-    try:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    except Exception:
-        pass
-
-
-def scrape_target(target_config: dict) -> list[RawRecord]:
-    url = target_config["entry_url"]
-    parser_name = target_config.get("parser", "")
-    fetch_kwargs = target_config.get("fetch_kwargs", {})
-    timeout = fetch_kwargs.get("timeout", 90000)
-    pages = target_config.get("pages", 1)
-    max_detail = fetch_kwargs.get("max_detail_pages", 15)
-    page_delay = fetch_kwargs.get("page_delay", 2.0)
-    wait_selector = fetch_kwargs.get("wait_selector")
-    block_domains = fetch_kwargs.get("blocked_domains")
-    disable_res = fetch_kwargs.get("disable_resources", True)
-    proxy = fetch_kwargs.get("proxy")
-
-    # Bandwidth-conscious: default to 1 page unless SCRAPE_FULL_PAGES=true
-    if os.environ.get("SCRAPE_FULL_PAGES", "").lower() != "true":
-        pages = 1
-
-    parser_func = PARSER_REGISTRY.get(parser_name)
-    if not parser_func:
-        raise ValueError(f"Unknown parser: {parser_name}")
-
-    session_options = {
-        "timeout": timeout,
-        "headless": True,
-        "solve_cloudflare": True,
-        "load_dom": True,
-        "network_idle": True,
-        "capture_xhr": r".*",
-        "disable_resources": disable_res,
-        "blocked_domains": BLOCKED_DOMAINS | (set(block_domains) if block_domains else set()),
-    }
-    if proxy:
-        session_options["proxy"] = proxy
-
-    all_records = []
-    detail_urls: list[tuple[int, str]] = []
-    bytes_fetched = 0
-
-    with StealthySession(**session_options) as session:
-        for page in range(1, pages + 1):
-            page_url = _build_page_url(parser_name, url, page)
-
-            # IndiaMART: random 8-20s pre-request delay
-            if parser_name == "parse_indiamart":
-                delay = random.uniform(8, 20)
-                logger.info("IndiaMART: waiting %.1fs before request (randomized delay)", delay)
-                time.sleep(delay)
-
-            # Vary wait strategy on retry for transient failures
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                logger.info("Fetching page %d/%d (attempt %d/%d): %s", page, pages, attempt + 1, max_attempts, page_url)
-                try:
-                    fetch_params = {
-                        "timeout": timeout,
-                        "wait": max(int(page_delay * 1000), 2000),
-                    }
-                    if wait_selector and attempt == 0:
-                        fetch_params["wait_selector"] = wait_selector
-                        fetch_params["wait_selector_state"] = "visible"
-                    if attempt >= 1:
-                        fetch_params["page_action"] = _scroll_page
-                        fetch_params["wait"] = max(int(page_delay * 1000), 3000)
-                    if attempt >= 2:
-                        fetch_params["wait_selector"] = None  # fall back to full wait
-                        fetch_params["wait"] = 8000
-
-                    response = session.fetch(page_url, **fetch_params)
-
-                    # Track bytes and detect blocks
-                    body = getattr(response, "html_content", None) or getattr(response, "text", b"")
-                    if isinstance(body, bytes):
-                        body_size = len(body)
-                    elif isinstance(body, str):
-                        body_size = len(body.encode("utf-8"))
-                    else:
-                        body_size = 0
-                    bytes_fetched += body_size
-
-                    if parser_name == "parse_justdial" and 0 < body_size < 500:
-                        logger.warning("Suspected block despite proxy (body=%d bytes)", body_size)
-
-                    records = parser_func(response, source_url=url)
-
-                    if records:
-                        all_records.extend(records)
-                        logger.info("Page %d: got %d records", page, len(records))
-                        page_detail_urls = _extract_detail_urls(parser_name, response, all_records, len(all_records) - len(records))
-                        detail_urls.extend(page_detail_urls)
-                        break  # success, move to next page
-
-                    status = getattr(response, "status_code", getattr(response, "status", 0))
-                    if status == 429:
-                        if parser_name == "parse_indiamart":
-                            headers = (getattr(response, "headers", {}) or {})
-                            ra_header = next(
-                                (v for k, v in headers.items() if k.lower() == "retry-after"),
-                                None,
-                            )
-                            if ra_header:
-                                try:
-                                    wait_sec = int(ra_header)
-                                except (ValueError, TypeError):
-                                    wait_sec = random.uniform(8, 20)
-                            else:
-                                wait_sec = random.uniform(8, 20)
-                            logger.warning("429 on %s, waiting %.1fs before retry (Retry-After=%s)", page_url, wait_sec, ra_header)
-                        else:
-                            wait_sec = 30 * (attempt + 1)
-                            logger.warning("429 rate limit on %s, waiting %ds before retry", page_url, wait_sec)
-                        time.sleep(wait_sec)
-                    else:
-                        logger.info("Empty response from %s (status=%s, attempt %d/%d), retrying...",
-                                     page_url, status, attempt + 1, max_attempts)
-                        if attempt < max_attempts - 1:
-                            time.sleep(5)
-                except Exception as exc:
-                    logger.warning("Failed page %d of %s (attempt %d/%d): %s", page, url, attempt + 1, max_attempts, exc)
-                    if attempt < max_attempts - 1:
-                        time.sleep(10)
-
-            if page < pages:
-                time.sleep(page_delay)
-
-        needy = [
-            (i, u) for i, u in detail_urls
-            if i < len(all_records) and not (all_records[i].phone and all_records[i].email)
-        ]
-        if needy:
-            logger.info("Enriching %d records via detail page scraping (max %d)", len(needy), max_detail)
-            _enrich_from_detail_pages(session, all_records, needy[:max_detail], timeout)
-
-    if parser_name == "parse_indiamart":
-        _enrich_indiamart_via_httpx(all_records, proxy=proxy)
-
-    with _TARGET_BYTES_LOCK:
-        _TARGET_BYTES[parser_name] = _TARGET_BYTES.get(parser_name, 0) + bytes_fetched
-    logger.info("Target %s: total bytes fetched = %d", parser_name, bytes_fetched)
-    return all_records
 
 
 def _save_debug_html(source_url: str, html: str) -> None:

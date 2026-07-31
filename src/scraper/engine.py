@@ -1,13 +1,10 @@
-"""Scrape orchestration — iterates targets and delegates to site parsers."""
+"""Scrape orchestration — iterates targets via LeadSpider and returns results."""
 
 import logging
 import os
-import time
 
 from src.config import load_targets_config
-from src.models import ScrapeError, now_utc
-from src.scraper.targets import scrape_target, get_target_bytes
-from src.scraper.utils import is_robots_allowed
+from src.scraper.spider import LeadSpider
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +76,8 @@ def _get_next_proxy() -> str | None:
     return proxy
 
 
-def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, list[ScrapeError]]:
-    """Scrape all configured target sites and aggregate records and errors.
-
-    Each target's pages are fetched via a persistent StealthySession (real
-    headless browser with Cloudflare solving), and parsed by the registered
-    parser function. Adds a delay between targets to avoid rate limiting.
-
-    Justdial and IndiaMART require a webshare proxy to run from GitHub-hosted
-    runners (Azure IP ranges are blocked). TradeIndia runs unproxied.
+def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, list]:
+    """Scrape all configured target sites using LeadSpider.
 
     Returns:
         A tuple of (all_records, errors).
@@ -95,51 +85,21 @@ def scrape_all_targets(targets_config: list[dict] | None = None) -> tuple[list, 
     if targets_config is None:
         targets_config = load_targets_config()
 
-    _init_proxy_pool()
+    spider = LeadSpider(targets_config)
+    result = spider.start()
 
-    all_records = []
-    errors = []
+    errors = spider.scrape_errors
+    all_records = spider.all_records
 
-    for idx, target in enumerate(targets_config):
-        url = target.get("entry_url", "")
-        target_delay = target.get("fetch_kwargs", {}).get("target_delay", 5.0)
-        name = target.get("name", "")
-
-        if idx > 0:
-            logger.info("Waiting %.1fs before next target...", target_delay)
-            time.sleep(target_delay)
-
-        # Proxy check: Justdial and IndiaMART require proxy
-        if name in ("Justdial", "IndiaMART"):
-            proxy = _get_next_proxy()
-            if not proxy:
-                logger.warning("%s requires a proxy but none configured — skipping", name)
-                errors.append(ScrapeError(url=url, timestamp=now_utc(), error_type="ProxyNotConfigured"))
-                continue
-            target.setdefault("fetch_kwargs", {})["proxy"] = proxy
-            logger.info("%s: using proxy %s", name, proxy.partition("@")[-1] or proxy)
-        else:
-            target.get("fetch_kwargs", {}).pop("proxy", None)
-
-        try:
-            if not is_robots_allowed(url):
-                logger.warning("Robots.txt disallows scraping %s — skipping", url)
-                errors.append(ScrapeError(url=url, timestamp=now_utc(), error_type="RobotsDisallowed"))
-                continue
-
-            logger.info("Scraping target: %s (pages=%s)", url, target.get("pages", 1))
-            records = scrape_target(target)
-            logger.info("Scraped %d records from %s", len(records), url)
-            all_records.extend(records)
-        except Exception as exc:
-            logger.warning("Failed to scrape %s: %s", url, exc, exc_info=True)
-            errors.append(ScrapeError(url=url, timestamp=now_utc(), error_type=type(exc).__name__))
-
-    target_bytes = get_target_bytes()
-    if target_bytes:
-        per_target = ", ".join(f"{k}={v:,}B" for k, v in target_bytes.items())
-        total = sum(target_bytes.values())
-        logger.info("Bytes fetched - %s | total=%s", per_target, f"{total:,}B")
-
-    logger.info("Scrape complete: %d total records, %d target errors", len(all_records), len(errors))
+    if result.paused:
+        logger.warning(
+            "Scrape paused mid-run (checkpoint saved) — returning %d partial records",
+            len(all_records),
+        )
+    logger.info(
+        "Scrape complete via LeadSpider: %d total records, %d target errors "
+        "(requests=%d, blocked=%d, items_scraped=%d)",
+        len(all_records), len(errors),
+        result.stats.requests_count, result.stats.blocked_requests_count, result.stats.items_scraped,
+    )
     return all_records, errors

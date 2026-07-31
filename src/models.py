@@ -30,6 +30,12 @@ class LeadRecord(BaseModel):
     scraped_at: datetime | None = None
     dedup_key: str | None = None
     lead_score: int | None = None
+    lead_score_breakdown: dict | None = None
+    sources: list[str] | None = None
+    city_slug: str | None = None
+    category_slug: str | None = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
 
     @field_validator("company_name")
     @classmethod
@@ -54,6 +60,25 @@ class LeadRecord(BaseModel):
         if v is not None and not (0 <= v <= 100):
             raise ValueError("lead_score must be between 0 and 100")
         return v
+
+
+class MergedCompany(BaseModel):
+    """An entity-resolved company record in the knowledge graph."""
+    dedup_key: str
+    company_name: str
+    normalized_name: str
+    phone: str | None = None
+    email: str | None = None
+    website: str | None = None
+    address: str | None = None
+    industry_code: str | None = None
+    sources: list[str] = []
+    cities: list[str] = []
+    categories: list[str] = []
+    lead_score: int | None = None
+    lead_score_breakdown: dict | None = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
 
 
 class ScrapeError(BaseModel):

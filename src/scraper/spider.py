@@ -9,9 +9,9 @@ daily request caps, stop-on-empty-page, and JustDial conditional modes.
 import json
 import logging
 import os
-import random
 import time
 from collections import defaultdict
+from typing import Callable
 
 import anyio
 
@@ -57,12 +57,54 @@ DOMAIN_DELAYS: dict[str, tuple[float, float]] = {
     SID_TRADEINDIA: (0.0, 0.0),
 }
 
+# Status codes treated as blocked. FR-004 mandates the 429 + 200/<500B classifier;
+# this restores the pre-migration transient/WAF block superset so Cloudflare
+# challenges (403) and server errors are also retried up to max_blocked_retries.
+BLOCKED_STATUS_CODES = (401, 403, 407, 429, 444, 500, 502, 503, 504)
+
 # URL templates per site — {category} and {city} replaced with site-specific labels
 SITE_URL_TEMPLATES = {
     "justdial": "https://www.justdial.com/{city}/{category}/nct-10278073",
     "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
     "tradeindia": "https://www.tradeindia.com/manufacturers/{category}.html",
 }
+
+
+def _build_stealth_kwargs(fetch_kwargs: dict, proxy: str | None) -> dict:
+    """Build AsyncStealthySession-only kwargs (justdial/indiamart). Requires proxy."""
+    if proxy is None:
+        raise ValueError("Stealth sessions (justdial/indiamart) require a proxy")
+    kwargs: dict = {
+        "timeout": int(fetch_kwargs.get("timeout", 90000)),
+        "proxy": proxy,
+    }
+    kwargs["wait"] = max(int(fetch_kwargs.get("page_delay", 2.0) * 1000), 2000)
+    if fetch_kwargs.get("wait_selector"):
+        kwargs["wait_selector"] = fetch_kwargs["wait_selector"]
+        kwargs["wait_selector_state"] = "visible"
+    return kwargs
+
+
+def _build_plain_kwargs(fetch_kwargs: dict, proxy: str | None) -> dict:
+    """Build FetcherSession-only kwargs (tradeindia). Proxy is deliberately ignored."""
+    return {"timeout": int(fetch_kwargs.get("timeout", 90000))}
+
+
+_SESSION_KWARG_FACTORIES: dict[str, Callable] = {
+    SID_JUSTDIAL: _build_stealth_kwargs,
+    SID_INDIAMART: _build_stealth_kwargs,
+    SID_TRADEINDIA: _build_plain_kwargs,
+}
+
+
+def _make_session_kwargs(sid: str, fetch_kwargs: dict, proxy: str | None) -> dict:
+    """Return only the kwargs valid for the given session type.
+
+    The sid is a dict lookup key, not an if/elif chain. A new sid MUST add an
+    entry to `_SESSION_KWARG_FACTORIES` or a KeyError is raised at the call site.
+    """
+    factory = _SESSION_KWARG_FACTORIES[sid]
+    return factory(fetch_kwargs, proxy)
 
 
 class DomainRequestCounter:
@@ -114,8 +156,10 @@ class DomainRequestCounter:
 class LeadSpider(Spider):
     name = "lead_spider"
     concurrent_requests = 2
+    concurrent_requests_per_domain = 1
     max_blocked_retries = 3
     download_delay = 0.0
+    download_delays: dict[str, tuple[float, float]] = DOMAIN_DELAYS
     autothrottle_enabled = False
     robots_txt_obey = False
     start_urls: list[str] = []
@@ -167,6 +211,28 @@ class LeadSpider(Spider):
                     return labels[site]
         return slug
 
+    def _determine_jd_mode(self) -> str:
+        """Determine which JustDial mode applies: residential, datacenter, or no_proxy."""
+        from src.scraper import engine as _engine_mod
+        _engine_mod._init_proxy_pool()
+        if os.environ.get("RESIDENTIAL_PROXY_URL_JUSTDIAL", "").strip():
+            return "residential"
+        if _engine_mod._PROXY_POOL:
+            return "datacenter"
+        return "no_proxy"
+
+    def _proxy_for(self, sid: str) -> str | None:
+        """Resolve the proxy for a sid, honoring JustDial's residential tier.
+
+        In residential mode JustDial requests use the residential rotating
+        endpoint directly (no datacenter rotation). Every other stealth sid uses
+        the shared WEBSHARE datacenter pool via ``_get_next_proxy()``.
+        """
+        from src.scraper.engine import _get_next_proxy
+        if sid == SID_JUSTDIAL and self._jd_mode == "residential":
+            return os.environ.get("RESIDENTIAL_PROXY_URL_JUSTDIAL", "").strip() or None
+        return _get_next_proxy()
+
     def _build_source_url(self, site_name: str, category_slug: str, city_slug: str | None) -> str:
         """Build the entry URL for a site/category/city combination."""
         template = self._url_templates.get(site_name.lower(), "")
@@ -202,13 +268,8 @@ class LeadSpider(Spider):
 
             # Determine which mode JustDial runs in
             if site_key == "justdial":
-                residential_proxy = os.environ.get("RESIDENTIAL_PROXY_URL_JUSTDIAL", "").strip()
-                if residential_proxy:
-                    self._jd_mode = "residential"
-                elif _engine_mod._PROXY_POOL:
-                    self._jd_mode = "datacenter"
-                else:
-                    self._jd_mode = "no_proxy"
+                self._jd_mode = self._determine_jd_mode()
+                if self._jd_mode == "no_proxy":
                     logger.warning("Justdial requires a proxy but none configured — skipping")
                     self.scrape_errors.append(ScrapeError(
                         url=target.get("entry_url", ""),
@@ -221,18 +282,14 @@ class LeadSpider(Spider):
             _robots_cache: dict[str, bool] = {}
 
             # For each category
-            for cat_idx, cat_item in enumerate(self._categories):
-                if cat_idx > 0:
-                    await anyio.sleep(random.uniform(3.0, 6.0))
+            for cat_item in self._categories:
                 if _proxy_exhausted:
                     break
                 category_slug = cat_item["slug"]
 
                 # For each city
                 cities_to_scrape = self._cities if site_key in ("justdial", "indiamart") else [{"slug": ""}]
-                for city_idx, city_item in enumerate(cities_to_scrape):
-                    if city_idx > 0:
-                        await anyio.sleep(random.uniform(2.0, 5.0))
+                for city_item in cities_to_scrape:
                     if _proxy_exhausted:
                         break
                     city_slug = city_item.get("slug", "")
@@ -244,15 +301,26 @@ class LeadSpider(Spider):
                     if not source_url:
                         continue
 
-                    # Domain request cap
+                    # Cached robots.txt check
                     domain = source_url.split("/")[2] if "//" in source_url else site_key
+                    if domain not in _robots_cache:
+                        _robots_cache[domain] = is_robots_allowed(source_url)
+                    if not _robots_cache[domain]:
+                        logger.warning("Robots.txt disallows scraping %s — skipping", domain)
+                        self.scrape_errors.append(ScrapeError(
+                            url=source_url, timestamp=now_utc(),
+                            error_type="RobotsDisallowed",
+                        ))
+                        continue
+
+                    # Domain request cap (after robots — disallowed combos must not consume the cap)
                     if not self._req_counter.allowed(domain, max_req):
                         logger.info("Daily cap reached for %s (%d) — stopping", domain, max_req)
                         _proxy_exhausted = True
                         break
 
                     if use_proxy:
-                        proxy = _engine_mod._get_next_proxy()
+                        proxy = self._proxy_for(sid)
                         if not proxy:
                             if site_key == "justdial":
                                 continue
@@ -264,32 +332,15 @@ class LeadSpider(Spider):
                             _proxy_exhausted = True
                             break
 
-                    # Cached robots.txt check
-                    if domain not in _robots_cache:
-                        _robots_cache[domain] = is_robots_allowed(source_url)
-                    if not _robots_cache[domain]:
-                        logger.warning("Robots.txt disallows scraping %s — skipping", domain)
-                        self.scrape_errors.append(ScrapeError(
-                            url=source_url, timestamp=now_utc(),
-                            error_type="RobotsDisallowed",
-                        ))
-                        continue
-
                     for page_num in range(1, pages + 1):
                         page_url = _build_page_url(parser_name, source_url, page_num)
 
-                        # Domain-scoped throttle delay via anyio.sleep
-                        delay_range = DOMAIN_DELAYS.get(sid, (0, 0))
-                        if delay_range[1] > 0 and page_num > 1:
-                            await anyio.sleep(random.uniform(*delay_range))
-
-                        session_kwargs = {"timeout": fetch_kwargs.get("timeout", 90000)}
-                        if use_proxy:
-                            session_kwargs["wait"] = max(int(fetch_kwargs.get("page_delay", 2.0) * 1000), 2000)
-                            if fetch_kwargs.get("wait_selector") and page_num == 1:
-                                session_kwargs["wait_selector"] = fetch_kwargs["wait_selector"]
-                                session_kwargs["wait_selector_state"] = "visible"
-                            session_kwargs["proxy"] = proxy
+                        # Session kwargs via per-sid factory (structural isolation, no shared dict)
+                        per_page_fetch = fetch_kwargs
+                        if page_num > 1 and "wait_selector" in fetch_kwargs:
+                            per_page_fetch = dict(fetch_kwargs)
+                            per_page_fetch.pop("wait_selector", None)
+                        session_kwargs = _make_session_kwargs(sid, per_page_fetch, proxy if use_proxy else None)
 
                         yield Request(
                             page_url,
@@ -325,6 +376,10 @@ class LeadSpider(Spider):
 
         parser_func = PARSER_REGISTRY.get(parser_name)
         if not parser_func:
+            logger.warning("No parser registered for %r — skipping response", parser_name)
+            self.scrape_errors.append(ScrapeError(
+                url=source_url, timestamp=now_utc(), error_type="UnknownParser",
+            ))
             return
 
         records = parser_func(response, source_url=source_url)
@@ -391,31 +446,43 @@ class LeadSpider(Spider):
             }
 
     async def is_blocked(self, response):
-        if response.status in (401, 403, 407, 429, 444, 500, 502, 503, 504):
+        if response.status in BLOCKED_STATUS_CODES:
             return True
         body = response.body
         body_size = len(body) if isinstance(body, bytes) else len(str(body).encode("utf-8"))
-        if response.status == 200 and 0 < body_size < 500:
+        if response.status == 200 and body_size < 500:
             return True
         return False
 
     async def retry_blocked_request(self, request, response):
         from src.scraper.engine import _get_next_proxy
-        proxy = _get_next_proxy()
-        if proxy:
-            request._session_kwargs["proxy"] = proxy
+        sid = request.sid
+
+        # FR-002/FR-003: only stealth sessions use proxies. A plain FetcherSession
+        # (tradeindia) must never receive one, even on retry. In residential mode
+        # JustDial keeps its residential rotating proxy (no datacenter rotation).
+        if sid in (SID_JUSTDIAL, SID_INDIAMART):
+            if sid == SID_JUSTDIAL and self._jd_mode == "residential":
+                proxy = os.environ.get("RESIDENTIAL_PROXY_URL_JUSTDIAL", "").strip() or None
+            else:
+                proxy = _get_next_proxy()
+            if proxy:
+                request._session_kwargs["proxy"] = proxy
+            else:
+                request._session_kwargs.pop("proxy", None)
         else:
+            proxy = None
             request._session_kwargs.pop("proxy", None)
 
-        sid = request.sid
         site_name = SITE_NAMES.get(sid, sid)
         body = response.body
         body_size = len(body) if isinstance(body, bytes) else len(str(body).encode("utf-8"))
         log_proxy = str(proxy).partition("@")[-1] if proxy else "none"
 
+        retry_note = "retrying with next proxy" if sid in (SID_JUSTDIAL, SID_INDIAMART) else "retrying"
         logger.warning(
-            "Blocked: %s via %s, body=%d bytes, retrying with next proxy",
-            site_name, log_proxy, body_size,
+            "Blocked: %s via %s, body=%d bytes, %s",
+            site_name, log_proxy, body_size, retry_note,
         )
 
         if sid == SID_JUSTDIAL:
@@ -424,6 +491,17 @@ class LeadSpider(Spider):
                 self._jd_stats["blocked"] += 1
 
         return request
+
+    async def on_start(self, resuming: bool = False):
+        if resuming:
+            logger.info("Resuming spider from checkpoint")
+        else:
+            logger.info(
+                "Starting spider: %d target(s), %d categories, %d cities",
+                len(self._targets_config), len(self._categories), len(self._cities),
+            )
+        self._jd_mode = self._determine_jd_mode()
+        logger.info("JustDial mode: %s", self._jd_mode)
 
     async def on_close(self):
         # TradeIndia detail page enrichment using FetcherSession
@@ -506,6 +584,9 @@ class LeadSpider(Spider):
 
         # JD mode report
         logger.info("JustDial mode: %s", self._jd_mode)
+
+        if self.crawldir is not None:
+            logger.info("Checkpointing configured (crawldir=%s)", self.crawldir)
 
         logger.info(
             "Scrape complete: %d total records, %d target errors",

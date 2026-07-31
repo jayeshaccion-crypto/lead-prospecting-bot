@@ -32,15 +32,10 @@ def build():
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    cur.execute("SELECT company_name, website, email, phone, address, industry_code, lead_score, dedup_key, source_url FROM Leads ORDER BY COALESCE(lead_score, '0') DESC, company_name")
+    cur.execute("SELECT company_name, website, email, phone, address, industry_code, dedup_key, source_url FROM Leads ORDER BY company_name")
     rows = []
     for r in cur.fetchall():
         d = dict(r)
-        if d.get("lead_score"):
-            try:
-                d["lead_score"] = int(d["lead_score"])
-            except ValueError:
-                pass
         d["source"] = _source_name(d.get("source_url"))
         rows.append(d)
 
@@ -49,8 +44,6 @@ def build():
     emails = sum(1 for r in rows if r.get("email"))
     websites = sum(1 for r in rows if r.get("website"))
     domains = sum(1 for r in rows if r.get("dedup_key"))
-    scores = [r["lead_score"] for r in rows if isinstance(r.get("lead_score"), int)]
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
     source_counts = Counter(r["source"] for r in rows)
 
     conn.close()
@@ -138,14 +131,6 @@ th:hover {{ color:#3b82f6; }}
 td {{ padding:12px 14px; border-bottom:1px solid #f1f5f9; }}
 tr:hover td {{ background:#f8fafc; }}
 .empt {{ color:#94a3b8; font-style:italic; }}
-.scr {{
-  display:inline-block; min-width:32px; text-align:center;
-  padding:2px 8px; border-radius:6px; font-weight:700; font-size:12px;
-}}
-.scr.high {{ background:#d1fae5; color:#065f46; }}
-.scr.med {{ background:#fef3c7; color:#92400e; }}
-.scr.low {{ background:#fee2e2; color:#991b1b; }}
-.scr.nil {{ background:#f1f5f9; color:#94a3b8; }}
 .tel {{ font-variant-numeric:tabular-nums; }}
 .adr {{ color:#475569; max-width:200px; }}
 .ind {{ color:#64748b; max-width:160px; }}
@@ -172,21 +157,14 @@ tr:hover td {{ background:#f8fafc; }}
 
 <div class="cards">
   <div class="card"><div class="lbl">Total Leads</div><div class="val blue">{total}</div></div>
-  <div class="card"><div class="lbl">Avg Score</div><div class="val gold">{avg_score}</div></div>
   <div class="card"><div class="lbl">With Phone</div><div class="val green">{phones}</div></div>
   <div class="card"><div class="lbl">With Email</div><div class="val purple">{emails}</div></div>
   <div class="card"><div class="lbl">With Website</div><div class="val red">{websites}</div></div>
+  <div class="card"><div class="lbl">Unique Domains</div><div class="val teal">{domains}</div></div>
 </div>
 
 <div class="controls">
   <input type="text" id="q" placeholder="Search name, phone, address, industry..." oninput="draw()">
-  <select id="sf" onchange="draw()">
-    <option value="">All scores</option>
-    <option value="high">High (60-100)</option>
-    <option value="med">Medium (20-59)</option>
-    <option value="low">Low (0-19)</option>
-    <option value="nil">No score</option>
-  </select>
   <select id="srcf" onchange="draw()">
     <option value="">All sources</option>
     {source_options}
@@ -212,7 +190,6 @@ tr:hover td {{ background:#f8fafc; }}
   <th onclick="sort(5)">Website</th>
   <th onclick="sort(6)">Address</th>
   <th onclick="sort(7)">Industry</th>
-  <th onclick="sort(8)">Score</th>
 </tr></thead>
 <tbody id="tb"></tbody>
 </table>
@@ -230,22 +207,16 @@ function _s(src) {{
   else if(src==='TradeIndia') cls='src-tradeindia';
   return '<span class="src-badge '+cls+'">'+src+'</span>';
 }}
-const _f = ['company_name','source','phone','email','website','address','industry_code','lead_score'];
+const _f = ['company_name','source','phone','email','website','address','industry_code'];
 let _sc=-1,_sa=true;
 
 function draw() {{
   var q=document.getElementById('q').value.toLowerCase();
-  var sf=document.getElementById('sf').value;
   var srcf=document.getElementById('srcf').value;
   var hasf=document.getElementById('hasf').value;
   var rows=_data.filter(function(r){{
     var s=(r.company_name+' '+(r.phone||'')+' '+(r.address||'')+' '+(r.industry_code||'')).toLowerCase();
     if(q&&!s.includes(q)) return false;
-    var sc=r.lead_score;
-    if(sf==='high'&&(sc===null||sc<60)) return false;
-    if(sf==='med'&&(sc===null||sc<20||sc>=60)) return false;
-    if(sf==='low'&&(sc===null||sc>=20)) return false;
-    if(sf==='nil'&&sc!==null) return false;
     if(srcf&&r.source!==srcf) return false;
     if(hasf==='phone'&&!r.phone) return false;
     if(hasf==='email'&&!r.email) return false;
@@ -256,19 +227,15 @@ function draw() {{
   if(_sc>=0){{var k=_f[_sc];rows.sort(function(a,b){{
     var va=(a[k]===null||a[k]===undefined?'':String(a[k])).toLowerCase();
     var vb=(b[k]===null||b[k]===undefined?'':String(b[k])).toLowerCase();
-    if(k==='lead_score'){{va=Number(va);vb=Number(vb);}}
     return va<vb?_sa?-1:1:va>vb?_sa?1:-1:0;
   }});}}
   document.getElementById('cnt').textContent='Showing '+rows.length+' of '+_data.length;
   document.getElementById('tb').innerHTML=rows.map(function(r,i){{
-    var sc=r.lead_score;
-    var scls=sc===null?'nil':sc>=60?'high':sc>=20?'med':'low';
     return '<tr><td>'+(i+1)+'</td><td><strong>'+_c(r.company_name)+'</strong></td>'+
       '<td>'+_s(r.source)+'</td>'+
       '<td class="tel">'+_c(r.phone)+'</td><td>'+_c(r.email)+'</td>'+
       '<td>'+_c(r.website)+'</td><td class="adr">'+_c(r.address)+'</td>'+
-      '<td class="ind">'+_c(r.industry_code).substring(0,120)+'</td>'+
-      '<td><span class="scr '+scls+'">'+(sc===null?'\u2014':sc)+'</span></td></tr>';
+      '<td class="ind">'+_c(r.industry_code).substring(0,120)+'</td></tr>';
   }}).join('');
 }}
 

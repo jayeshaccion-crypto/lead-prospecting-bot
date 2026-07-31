@@ -30,22 +30,26 @@ from src.scraper.targets import RawRecord
 def small_config(monkeypatch):
     """Patches config loading so start_requests iterates 1 category x 1 city."""
     full = {
-        "expansion": {
-            "categories": [{
-                "slug": "it-services",
-                "labels": {
-                    "justdial": "IT-Services",
-                    "indiamart": "software-development-services",
-                    "tradeindia": "IT-Services",
-                },
-            }],
-            "cities": [{"slug": "delhi", "labels": {"justdial": "Delhi", "indiamart": "new-delhi"}}],
-        },
+        "categories": [{
+            "slug": "it-services",
+            "labels": {
+                "justdial": "IT-Services",
+                "indiamart": "software-development-services",
+                "tradeindia": "IT-Services",
+            },
+        }],
+        "cities": [{
+            "slug": "delhi",
+            "labels": {"justdial": "Delhi", "indiamart": "new-delhi", "tradeindia": "new-delhi"},
+            "tradeindia_code": "228067",
+        }],
         "url_templates": {
             "justdial": "https://www.justdial.com/{city}/{category}/nct-10278073",
             "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
-            "tradeindia": "https://www.tradeindia.com/manufacturers/{category}.html",
+            "tradeindia": "https://www.tradeindia.com/{city}/{category}-city-{code}.html",
         },
+        "icp_categories": [],
+        "icp_cities": [],
     }
     monkeypatch.setattr(spider_mod, "load_full_config", lambda: full)
     monkeypatch.setattr(spider_mod, "get_icp_categories", lambda cfg: [])
@@ -595,7 +599,6 @@ class TestStartRequests:
         assert _collect(s) == []
 
     def test_wait_selector_only_on_first_page(self, make_spider, monkeypatch):
-        monkeypatch.setenv("SCRAPE_FULL_PAGES", "true")
         monkeypatch.setenv("RESIDENTIAL_PROXY_URL_JUSTDIAL", "http://user:pass@residential.example:3128")
         cfg = dict(self.JD)
         cfg["pages"] = 2
@@ -613,6 +616,560 @@ class TestStartRequests:
         cfg["enabled"] = False
         s = make_spider([cfg])
         assert _collect(s) == []
+
+
+class TestStartRequestsExpansion:
+    """SC-001 — start_requests yields exactly N×M page-1 Requests per site (lazy)."""
+
+    def _n_m_config(self, n_cats, n_cities, monkeypatch):
+        cats = [{
+            "slug": f"cat{i}",
+            "labels": {"indiamart": f"cat-{i}", "tradeindia": f"cat{i}"},
+        } for i in range(n_cats)]
+        cities = [{
+            "slug": f"city{i}",
+            "labels": {"indiamart": f"city{i}", "tradeindia": f"city{i}"},
+            "tradeindia_code": str(100000 + i),
+        } for i in range(n_cities)]
+        full = {
+            "categories": cats,
+            "cities": cities,
+            "url_templates": {
+                "justdial": "https://www.justdial.com/{city}/{category}/nct-10278073",
+                "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
+                "tradeindia": "https://www.tradeindia.com/{city}/{category}-city-{code}.html",
+            },
+            "icp_categories": [],
+            "icp_cities": [],
+        }
+        monkeypatch.setattr(spider_mod, "load_full_config", lambda: full)
+
+    def test_two_by_two_yields_four_per_site(self, make_spider, monkeypatch, proxy_pool):
+        self._n_m_config(2, 2, monkeypatch)
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        reqs = _collect(s)
+        im = [r for r in reqs if r.sid == SID_INDIAMART]
+        ti = [r for r in reqs if r.sid == SID_TRADEINDIA]
+        assert len(im) == 4
+        assert len(ti) == 4
+        assert all(r.meta["page"] == 1 for r in im + ti)
+        assert all(r.meta["pages_total"] == 10 for r in im + ti)
+
+    def test_requests_carry_sid_and_session_kwargs(self, make_spider, monkeypatch, proxy_pool):
+        self._n_m_config(1, 1, monkeypatch)
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        reqs = _collect(s)
+        by_sid = {r.sid: r for r in reqs}
+        assert by_sid[SID_TRADEINDIA]._session_kwargs == {"timeout": 90000}
+        assert by_sid[SID_INDIAMART]._session_kwargs["proxy"].startswith("http://")
+        assert by_sid[SID_INDIAMART].meta["daily_cap"] == 10
+
+    def test_stale_scrape_full_pages_ignored(self, make_spider, monkeypatch, proxy_pool):
+        """US2/Q5 — a stale SCRAPE_FULL_PAGES env var is ignored; max_pages is sole control."""
+        monkeypatch.setenv("SCRAPE_FULL_PAGES", "true")
+        self._n_m_config(1, 1, monkeypatch)
+        s = make_spider([TestStartRequests.TI])
+        reqs = _collect(s)
+        assert len(reqs) == 1  # page 1 only (lazy), regardless of stale gate
+        assert reqs[0].meta["pages_total"] == 10
+
+        monkeypatch.setenv("SCRAPE_FULL_PAGES", "false")
+        s2 = make_spider([TestStartRequests.TI])
+        reqs2 = _collect(s2)
+        assert len(reqs2) == 1
+        assert reqs2[0].meta["pages_total"] == 10
+
+    def test_robots_disallowed_reported_once_per_domain(self, make_spider, monkeypatch):
+        """H2 — a per-domain robots disallow logs one error, not one per combo."""
+        self._n_m_config(2, 2, monkeypatch)
+        monkeypatch.setattr(spider_mod, "is_robots_allowed", lambda url, **kw: False)
+        s = make_spider([TestStartRequests.TI])
+        _collect(s)
+        errs = [e for e in s.scrape_errors if e.error_type == "RobotsDisallowed"]
+        assert len(errs) == 1
+
+    def test_missing_tradeindia_code_skips_site_with_config_error(
+        self, make_spider, monkeypatch, proxy_pool,
+    ):
+        """M1 — a missing tradeindia_code fails loudly for TI only; IM keeps crawling."""
+        full = {
+            "categories": [{"slug": "c0", "labels": {"indiamart": "c0", "tradeindia": "c0"}}],
+            "cities": [{"slug": "ci0", "labels": {"indiamart": "ci0", "tradeindia": "ci0"}}],
+            "url_templates": {
+                "justdial": "https://www.justdial.com/{city}/{category}/nct-10278073",
+                "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
+                "tradeindia": "https://www.tradeindia.com/{city}/{category}-city-{code}.html",
+            },
+            "icp_categories": [],
+            "icp_cities": [],
+        }
+        monkeypatch.setattr(spider_mod, "load_full_config", lambda: full)
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        reqs = _collect(s)
+        assert len(reqs) == 1
+        assert all(r.sid == SID_INDIAMART for r in reqs)
+        assert any(e.error_type == "ConfigError" for e in s.scrape_errors)
+
+    def test_invalid_max_pages_records_config_error(self, make_spider):
+        """M4 — max_pages < 1 fails loudly per site instead of silently over-running."""
+        cfg = dict(TestStartRequests.TI)
+        cfg["max_pages"] = 0
+        s = make_spider([cfg])
+        assert _collect(s) == []
+        assert any(e.error_type == "ConfigError" for e in s.scrape_errors)
+
+    def test_enabled_defaults_to_false(self, make_spider):
+        """M4 — a target without an `enabled` key is skipped (contract default false)."""
+        cfg = dict(TestStartRequests.TI)
+        cfg.pop("enabled")
+        s = make_spider([cfg])
+        assert _collect(s) == []
+
+    def test_icp_allowlists_inert_at_crawl(self, make_spider, monkeypatch, proxy_pool):
+        """V12/FR-002 — populated ICP allowlists change nothing at crawl time."""
+        self._n_m_config(2, 2, monkeypatch)
+        full = spider_mod.load_full_config()
+        full["icp_categories"] = ["cat0"]
+        full["icp_cities"] = ["city0"]
+        monkeypatch.setattr(spider_mod, "load_full_config", lambda: full)
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        reqs = _collect(s)
+        assert len([r for r in reqs if r.sid == SID_INDIAMART]) == 4
+        assert len([r for r in reqs if r.sid == SID_TRADEINDIA]) == 4
+        assert s.scrape_errors == []
+
+    def test_empty_categories_at_spider_level_continues(self, make_spider, monkeypatch, caplog):
+        """V11 — empty categories → no combos, explicit warning, run continues."""
+        self._n_m_config(0, 2, monkeypatch)
+        import logging
+        with caplog.at_level(logging.WARNING):
+            s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+            assert _collect(s) == []
+        assert "No categories configured" in caplog.text
+
+    def test_robots_disallowed_domain_never_consumes_cap(self, make_spider, monkeypatch, proxy_pool):
+        """T008 — robots runs before cap; a disallowed domain consumes zero budget."""
+        self._n_m_config(2, 2, monkeypatch)
+
+        def robots(url, **kw):
+            return "indiamart.com" not in url
+
+        monkeypatch.setattr(spider_mod, "is_robots_allowed", robots)
+        consumed = []
+        monkeypatch.setattr(
+            spider_mod.DomainRequestCounter, "allowed",
+            lambda self, domain, cap: consumed.append(domain) or True,
+        )
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        _collect(s)
+        assert "dir.indiamart.com" not in consumed
+        assert consumed == ["www.tradeindia.com"] * 4
+
+    def test_large_cross_product_cap_bounds_requests(
+        self, monkeypatch, isolated_counter, proxy_pool,
+    ):
+        """SC-004 — 100 IndiaMART combos with a cap of 5 yield exactly 5 requests; TradeIndia continues."""
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr(spider_mod, "is_robots_allowed", lambda url, **kw: True)
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        self._n_m_config(10, 10, monkeypatch)
+        im = dict(TestStartRequests.IM)
+        im["max_requests_per_day"] = 5
+        ti = dict(TestStartRequests.TI)
+        ti["max_requests_per_day"] = 1000
+        s = spider_mod.LeadSpider([im, ti])
+        reqs = _collect(s)
+        im_reqs = [r for r in reqs if r.sid == SID_INDIAMART]
+        ti_reqs = [r for r in reqs if r.sid == SID_TRADEINDIA]
+        assert len(im_reqs) == 5
+        assert len(ti_reqs) == 100
+        assert "dir.indiamart.com" in s._cap_reached
+        assert "www.tradeindia.com" not in s._cap_reached
+        assert all(r.meta["page"] == 1 for r in reqs)
+
+
+class TestLazyPagination:
+    """T009/T011 — lazy pagination + early-stop for IndiaMART/TradeIndia."""
+
+    @staticmethod
+    def _response(meta, body=b"<html>lead page</html>"):
+        resp = MagicMock()
+        resp.status = 200
+        resp.body = body
+        resp.html_content = body
+        resp.text = body.decode("utf-8", errors="replace")
+        resp.meta = meta
+        resp.url = meta["source_url"]
+        return resp
+
+    @staticmethod
+    def _collect(s, response):
+        async def run():
+            out = []
+            async for item in s.parse(response):
+                out.append(item)
+            return out
+        return anyio.run(run)
+
+    def _im_meta(self, **over):
+        meta = {
+            "parser": "parse_indiamart",
+            "source_url": "https://dir.indiamart.com/new-delhi/software-development-services.html",
+            "site_name": "IndiaMART",
+            "category_slug": "software-development",
+            "city_slug": "new-delhi",
+            "fetch_kwargs": {"timeout": 120000, "wait_selector": ".card"},
+            "page": 1,
+            "pages_total": 5,
+            "daily_cap": 40,
+        }
+        meta.update(over)
+        return meta
+
+    def _register_parser(self, monkeypatch, records):
+        def fake_parser(response, source_url=""):
+            return [RawRecord(company_name=n, source_url=source_url) for n in records]
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_indiamart", fake_parser)
+
+    def test_new_listings_yields_next_page(self, make_spider, monkeypatch, proxy_pool):
+        s = make_spider([TestStartRequests.IM])
+        self._register_parser(monkeypatch, ["Acme", "Beta"])
+        out = self._collect(s, self._response(self._im_meta()))
+        next_reqs = [x for x in out if isinstance(x, Request)]
+        assert len(next_reqs) == 1
+        req = next_reqs[0]
+        assert req.sid == SID_INDIAMART
+        assert req.meta["page"] == 2
+        assert req.meta["pages_total"] == 5
+        assert req.meta["category_slug"] == "software-development"
+        assert "wait_selector" not in req._session_kwargs
+        assert req._session_kwargs["proxy"].startswith("http://")
+        assert req.url == "https://dir.indiamart.com/new-delhi/software-development-services.html?page=2"
+        assert s._early_stopped_targets == {}
+
+    def test_max_pages_never_exceeded(self, make_spider, monkeypatch, proxy_pool):
+        s = make_spider([TestStartRequests.IM])
+        self._register_parser(monkeypatch, ["Acme"])
+        out = self._collect(s, self._response(self._im_meta(page=5, pages_total=5)))
+        next_reqs = [x for x in out if isinstance(x, Request)]
+        assert next_reqs == []
+
+    def test_all_duplicate_page_early_stops(self, make_spider, monkeypatch, proxy_pool):
+        s = make_spider([TestStartRequests.IM])
+        self._register_parser(monkeypatch, ["Acme", "Beta"])
+        self._collect(s, self._response(self._im_meta(page=1)))
+        # page 2 repeats every listing from page 1 → 0 new → early-stop
+        out2 = self._collect(s, self._response(self._im_meta(page=2)))
+        next_reqs = [x for x in out2 if isinstance(x, Request)]
+        assert next_reqs == []
+        assert s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] == "0_new"
+
+    def test_empty_page_early_stops(self, make_spider, monkeypatch, proxy_pool):
+        s = make_spider([TestStartRequests.IM])
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_indiamart",
+                            lambda response, source_url="": [])
+        out = self._collect(s, self._response(self._im_meta()))
+        assert out == []
+        assert s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] == "empty"
+
+    def test_blocked_page_retried_not_early_stopped(self, make_spider, monkeypatch):
+        """US2-AS4 — a blocked body is retried by the engine and never mistaken for an empty result."""
+        from scrapling.spiders.engine import CrawlerEngine
+
+        s = make_spider([TestStartRequests.TI])
+        s.download_delays = {}
+        session = _StubSessionManager([(429, b"Rate limited"), (200, b"x" * 5000)])
+        engine = CrawlerEngine(s, session, crawldir=None)
+        req = Request(
+            "https://www.tradeindia.com/x", sid=SID_TRADEINDIA,
+            meta={"parser": "parse_tradeindia", "source_url": "https://www.tradeindia.com/x",
+                  "site_name": "TradeIndia", "category_slug": "c", "city_slug": "ci",
+                  "fetch_kwargs": {}, "page": 1, "pages_total": 5, "daily_cap": 40},
+        )
+
+        async def run():
+            await engine._process_request(req)
+            return engine.scheduler.snapshot()
+
+        pending, _ = anyio.run(run)
+        assert len(pending) == 1  # re-enqueued for retry, not dropped
+        assert engine.stats.blocked_requests_count == 1
+        assert s._early_stopped_targets == {}  # never recorded as early-stop
+
+    def test_next_page_carries_pages_total_for_tradeindia(self, make_spider, monkeypatch):
+        s = make_spider([TestStartRequests.TI])
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_tradeindia",
+                            lambda response, source_url="": [RawRecord(company_name="A", source_url=source_url)])
+        meta = {
+            "parser": "parse_tradeindia",
+            "source_url": "https://www.tradeindia.com/new-delhi/software-development-city-228067.html",
+            "site_name": "TradeIndia",
+            "category_slug": "software-development",
+            "city_slug": "new-delhi",
+            "fetch_kwargs": {"timeout": 90000},
+            "page": 1,
+            "pages_total": 7,
+            "daily_cap": 100,
+        }
+        out = self._collect(s, self._response(meta))
+        next_reqs = [x for x in out if isinstance(x, Request)]
+        assert len(next_reqs) == 1
+        assert next_reqs[0].sid == SID_TRADEINDIA
+        assert next_reqs[0].meta["pages_total"] == 7
+        assert next_reqs[0]._session_kwargs == {"timeout": 90000}
+
+    def test_next_page_stops_gracefully_when_no_proxy(self, make_spider, monkeypatch):
+        """F2 — no proxy for a stealth next page stops the target without raising."""
+        monkeypatch.setattr(scraper_engine, "_PROXY_POOL", [])
+        s = make_spider([TestStartRequests.IM])
+        self._register_parser(monkeypatch, ["Acme"])
+        out = self._collect(s, self._response(self._im_meta()))
+        next_reqs = [x for x in out if isinstance(x, Request)]
+        assert next_reqs == []
+        items = [x for x in out if isinstance(x, dict)]
+        assert len(items) == 1  # page records still emitted
+        assert s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] == "no_proxy"
+
+    def test_justdial_parse_never_early_stopped(self, make_spider, monkeypatch):
+        """FR-004 — JD eager depth is not subject to lazy early-stop."""
+        s = make_spider([TestStartRequests.JD])
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_justdial",
+                            lambda response, source_url="": [RawRecord(company_name="Acme", source_url=source_url)])
+        meta = {
+            "parser": "parse_justdial",
+            "source_url": "https://www.justdial.com/Delhi/IT-Services/nct-10278073",
+            "site_name": "Justdial",
+            "category_slug": "it-services",
+            "city_slug": "delhi",
+            "fetch_kwargs": {},
+            "page": 1,
+            "pages_total": 3,
+            "daily_cap": 10,
+        }
+        out = self._collect(s, self._response(meta))
+        assert s._early_stopped_targets == {}
+        assert s._jd_stats["succeeded"] == 1
+        assert all(not isinstance(x, Request) for x in out)
+        assert len([x for x in out if isinstance(x, dict)]) == 1
+
+    def test_all_empty_company_names_early_stops_but_emits(self, make_spider, monkeypatch):
+        """F9 — records with empty names count as 0 new (early-stop) but still emit."""
+        s = make_spider([TestStartRequests.IM])
+        self._register_parser(monkeypatch, ["", ""])
+        out = self._collect(s, self._response(self._im_meta()))
+        assert s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] == "0_new"
+        items = [x for x in out if isinstance(x, dict)]
+        assert len(items) == 2
+        assert all(not isinstance(x, Request) for x in out)
+
+    def test_page_three_all_duplicates_never_requests_four(self, make_spider, monkeypatch, proxy_pool):
+        """V4 — a target whose results end on page 3 issues zero requests for pages 4-10."""
+        s = make_spider([TestStartRequests.IM])
+        plan = {"p1": ["A", "B"], "p2": ["C"], "p3": ["C"]}
+
+        def fake(response, source_url=""):
+            return [RawRecord(company_name=n, source_url=source_url)
+                    for n in plan[response.meta["page_key"]]]
+
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_indiamart", fake)
+        out = self._collect(s, self._response(self._im_meta(pages_total=10, page_key="p1")))
+        assert len([x for x in out if isinstance(x, Request)]) == 1  # page 2
+        out = self._collect(s, self._response(self._im_meta(pages_total=10, page=2, page_key="p2")))
+        assert len([x for x in out if isinstance(x, Request)]) == 1  # page 3
+        out = self._collect(s, self._response(self._im_meta(pages_total=10, page=3, page_key="p3")))
+        assert [x for x in out if isinstance(x, Request)] == []  # pages 4-10 never requested
+        assert s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] == "0_new"
+
+    def test_early_stop_is_per_target_other_targets_continue(self, make_spider, monkeypatch, proxy_pool):
+        """V4 — stopping one category×city target does not stop another target."""
+        full = {
+            "categories": [
+                {"slug": "cat0", "labels": {"indiamart": "cat-0", "tradeindia": "cat0"}},
+                {"slug": "cat1", "labels": {"indiamart": "cat-1", "tradeindia": "cat1"}},
+            ],
+            "cities": [{
+                "slug": "city0", "labels": {"indiamart": "city0", "tradeindia": "city0"},
+                "tradeindia_code": "100000",
+            }],
+            "url_templates": {
+                "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
+                "tradeindia": "https://www.tradeindia.com/{city}/{category}-city-{code}.html",
+            },
+            "icp_categories": [],
+            "icp_cities": [],
+        }
+        monkeypatch.setattr(spider_mod, "load_full_config", lambda: full)
+        s = make_spider([TestStartRequests.IM])
+        content = {"cat0": ["Acme"], "cat1": ["Beta"]}
+
+        def fake(response, source_url=""):
+            return [RawRecord(company_name=n, source_url=source_url)
+                    for n in content[response.meta["category_slug"]]]
+
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_indiamart", fake)
+        out = self._collect(s, self._response(self._im_meta(category_slug="cat0", city_slug="city0")))
+        assert len([x for x in out if isinstance(x, Request)]) == 1  # cat0 page 2
+        out = self._collect(s, self._response(self._im_meta(category_slug="cat0", city_slug="city0", page=2)))
+        assert [x for x in out if isinstance(x, Request)] == []  # cat0 early-stops
+        out = self._collect(s, self._response(self._im_meta(category_slug="cat1", city_slug="city0")))
+        assert len([x for x in out if isinstance(x, Request)]) == 1  # cat1 still paginates
+        assert s._early_stopped_targets[("indiamart", "cat0", "city0")] == "0_new"
+        assert ("indiamart", "cat1", "city0") not in s._early_stopped_targets
+
+    def test_next_page_does_not_recheck_robots(self, make_spider, monkeypatch, proxy_pool):
+        """U6 — pagination relies on the page-1 robots cache; no per-page re-check."""
+        calls = []
+        monkeypatch.setattr(spider_mod, "is_robots_allowed",
+                            lambda url, **kw: calls.append(url) or True)
+        s = make_spider([TestStartRequests.IM])
+        reqs = _collect(s)  # page 1 start request → one robots check per domain
+        assert len(reqs) == 1
+        self._register_parser(monkeypatch, ["Acme"])
+        out = self._collect(s, self._response(self._im_meta()))
+        assert len([x for x in out if isinstance(x, Request)]) == 1  # page 2 yielded
+        assert len(calls) == 1  # robots not re-checked for page 2
+
+
+class TestDailyCaps:
+    """T012/T013 — hard stop per domain, enrichment counting, same-day persistence, day reset."""
+
+    def test_cap_hard_stop_per_domain(self, make_spider, monkeypatch, proxy_pool):
+        allowed_calls = []
+
+        def fake_allowed(self, domain, cap):
+            allowed_calls.append(domain)
+            return domain != "dir.indiamart.com"  # IndiaMART exhausted, TradeIndia allowed
+
+        monkeypatch.setattr(spider_mod.DomainRequestCounter, "allowed", fake_allowed)
+        s = make_spider([TestStartRequests.IM, TestStartRequests.TI])
+        reqs = _collect(s)
+        assert [r.sid for r in reqs] == [SID_TRADEINDIA]
+        assert "dir.indiamart.com" in allowed_calls
+        assert "www.tradeindia.com" in allowed_calls
+        assert "dir.indiamart.com" in s._cap_reached
+
+    def test_parse_next_page_stops_when_cap_exhausted(self, small_config, isolated_counter, monkeypatch):
+        """T013 — the cap is checked at every page yield point (parse included)."""
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr(spider_mod, "is_robots_allowed", lambda url, **kw: True)
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([TestStartRequests.TI])
+
+        # exhaust the tradeindia budget (real counter persisted via isolated_counter)
+        assert s._req_counter.allowed("www.tradeindia.com", 2) is True
+        assert s._req_counter.allowed("www.tradeindia.com", 2) is True
+
+        monkeypatch.setitem(spider_mod.PARSER_REGISTRY, "parse_tradeindia",
+                            lambda response, source_url="": [RawRecord(company_name="A", source_url=source_url)])
+        meta = {
+            "parser": "parse_tradeindia",
+            "source_url": "https://www.tradeindia.com/x",
+            "site_name": "TradeIndia",
+            "category_slug": "c", "city_slug": "ci",
+            "fetch_kwargs": {"timeout": 90000},
+            "page": 1, "pages_total": 5, "daily_cap": 2,
+        }
+        resp = TestLazyPagination._response(meta)
+        out = TestLazyPagination._collect(s, resp)
+        next_reqs = [x for x in out if isinstance(x, Request)]
+        assert next_reqs == []
+        assert "www.tradeindia.com" in s._cap_reached
+        assert s._early_stopped_targets[("tradeindia", "c", "ci")] == "cap_reached"
+
+    def test_justdial_cap_counts_each_page_request(self, small_config, isolated_counter, monkeypatch):
+        """F1 — JD consumes one budget unit per page request, not one per combo."""
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr(spider_mod, "is_robots_allowed", lambda url, **kw: True)
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        monkeypatch.setenv("RESIDENTIAL_PROXY_URL_JUSTDIAL", "http://user:pass@residential.example:3128")
+        cfg = dict(TestStartRequests.JD)
+        cfg["pages"] = 3
+        cfg["max_requests_per_day"] = 2
+        s = spider_mod.LeadSpider([cfg])
+        reqs = _collect(s)
+        assert len(reqs) == 2  # cap 2 → only 2 of the 3 eager pages yielded
+        assert all(r.sid == SID_JUSTDIAL for r in reqs)
+        assert "www.justdial.com" in s._cap_reached
+
+    def test_on_close_im_enrichment_runs_once(self, small_config, isolated_counter, monkeypatch):
+        """M5 — multiple IM _enrich_data entries trigger a single httpx enrichment pass."""
+        from unittest.mock import MagicMock as _MM
+        import anyio
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([TestStartRequests.IM])
+        s._enrich_data = [
+            {"parser": "parse_indiamart", "domain": "dir.indiamart.com", "daily_cap": 40},
+            {"parser": "parse_indiamart", "domain": "dir.indiamart.com", "daily_cap": 40},
+        ]
+        calls = []
+        monkeypatch.setattr(
+            spider_mod, "_enrich_indiamart_via_httpx",
+            lambda records, proxy, cap_guard: calls.append(1) or 0,
+        )
+        anyio.run(s.on_close)
+        assert calls == [1]
+
+    def test_enrichment_detail_pages_count_against_cap(self):
+        """T014 — cap_guard gates each detail-page fetch."""
+        from src.scraper.targets import _enrich_from_detail_pages
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"Contact: 9876543210, info@co.com"
+        session.fetch.return_value = resp
+        calls = []
+
+        def guard():
+            calls.append(1)
+            return len(calls) <= 1  # first fetch allowed, rest denied
+
+        targets = [(0, "https://detail.com/1"), (0, "https://detail.com/2")]
+        records = [rec]
+        _enrich_from_detail_pages(session, records, targets, timeout=30000, cap_guard=guard)
+        assert session.fetch.call_count == 1  # second fetch denied → skipped
+        assert len(calls) == 2
+
+    def test_httpx_enrichment_cap_guard_denied_early(self, monkeypatch):
+        """T014 — httpx enrichment respects the cap guard."""
+        import sys
+        monkeypatch.setitem(sys.modules, "httpx", MagicMock())
+        from src.scraper.targets import _enrich_indiamart_via_httpx
+        rec = RawRecord(company_name="C", phone=None)
+        calls = []
+
+        def guard():
+            calls.append(1)
+            return False
+
+        assert _enrich_indiamart_via_httpx([rec], None, guard) == 0
+        assert calls == [1]
+
+    def test_second_same_day_run_respects_consumed_budget(self, isolated_counter):
+        """US3-AS3 — a second run sees the first run's consumed budget."""
+        from src.scraper.spider import DomainRequestCounter
+        counter1 = DomainRequestCounter()
+        assert counter1.allowed("dir.indiamart.com", 1) is True
+        assert counter1.allowed("dir.indiamart.com", 1) is False
+
+        counter2 = DomainRequestCounter()  # same calendar day, same persisted store
+        assert counter2.allowed("dir.indiamart.com", 1) is False
+        assert counter2.snapshot().get("dir.indiamart.com") == 1
+
+    def test_new_calendar_day_resets_budget(self, isolated_counter, monkeypatch):
+        """US3-AS4 — a new calendar day resets per-domain budgets."""
+        from src.scraper.spider import DomainRequestCounter
+        counter1 = DomainRequestCounter()
+        assert counter1.allowed("dir.indiamart.com", 1) is True
+        assert counter1.snapshot().get("dir.indiamart.com") == 1
+
+        monkeypatch.setattr(spider_mod.time, "strftime", lambda fmt: "2099-01-02")
+        counter2 = DomainRequestCounter()
+        assert counter2.allowed("dir.indiamart.com", 1) is True  # budget reset
+        assert counter2.snapshot().get("dir.indiamart.com") == 1
 
 
 class TestOnStart:
@@ -1280,6 +1837,29 @@ class TestSummaryLines:
         self._close(s, caplog)
         assert "JustDial mode: no_proxy" in caplog.text
 
+    def test_summary_reports_cap_reached_and_early_stopped(self, make_spider, caplog):
+        """FR-008 — run summary logs cap-reached and early-stopped targets."""
+        s = make_spider([])
+        s._cap_reached.add("dir.indiamart.com")
+        s._early_stopped_targets[("indiamart", "software-development", "new-delhi")] = "0_new"
+        self._close(s, caplog)
+        assert "Daily cap reached for domain(s): dir.indiamart.com" in caplog.text
+        assert "Early-stopped targets (1)" in caplog.text
+        assert "indiamart/software-development/new-delhi" in caplog.text
+
+    def test_summary_reports_budget_used_per_domain(self, small_config, isolated_counter, monkeypatch, caplog):
+        """FR-008 — summary logs budget units consumed per domain (snapshot, no internal keys)."""
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", MagicMock)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", MagicMock)
+        s = spider_mod.LeadSpider([TestStartRequests.TI])
+        s._req_counter.allowed("www.tradeindia.com", 100)
+        s._req_counter.allowed("dir.indiamart.com", 40)
+        self._close(s, caplog)
+        assert "Daily request budget used per domain:" in caplog.text
+        assert "www.tradeindia.com=1" in caplog.text
+        assert "dir.indiamart.com=1" in caplog.text
+        assert "__jd_asn_test" not in caplog.text  # internal marker filtered
+
     def test_justdial_summary_residential_conclusion_wording(self, make_spider, isolated_counter, monkeypatch, caplog):
         s = make_spider([])
         s._jd_mode = "residential"
@@ -1291,23 +1871,27 @@ class TestSummaryLines:
 
 
 class TestResidentialDepth:
-    """SC-001/FR-002 — JD crawl depth equals IndiaMart/TradeIndia at full pages."""
+    """SC-001/FR-002/SC-005 — JD eager depth equals IM/TI configured max_pages (lazy)."""
 
-    def test_full_depth_equals_other_directories(self, make_spider, monkeypatch, proxy_pool):
+    def test_jd_eager_pages_equal_im_ti_max_pages(self, make_spider, monkeypatch, proxy_pool):
         monkeypatch.setenv("RESIDENTIAL_PROXY_URL_JUSTDIAL", "http://user:pass@residential.example:3128")
-        monkeypatch.setenv("SCRAPE_FULL_PAGES", "true")
         cfg = dict(TestStartRequests.JD)
-        cfg["pages"] = 2
+        cfg["pages"] = 3
         im = dict(TestStartRequests.IM)
-        im["pages"] = 2
+        im["max_pages"] = 3
         ti = dict(TestStartRequests.TI)
-        ti["pages"] = 2
+        ti["max_pages"] = 3
         s = make_spider([cfg, im, ti])
         reqs = _collect(s)
         jd = [r for r in reqs if r.sid == SID_JUSTDIAL]
         im_reqs = [r for r in reqs if r.sid == SID_INDIAMART]
         ti_reqs = [r for r in reqs if r.sid == SID_TRADEINDIA]
-        assert len(jd) == len(im_reqs) == len(ti_reqs) == 2
+        # JD yields all `pages` eagerly (unchanged); IM/TI yield page 1 only (lazy).
+        assert len(jd) == 3
+        assert len(im_reqs) == 1
+        assert len(ti_reqs) == 1
+        assert im_reqs[0].meta["pages_total"] == 3
+        assert ti_reqs[0].meta["pages_total"] == 3
         assert all(r._session_kwargs["proxy"] == "http://user:pass@residential.example:3128" for r in jd)
 
 

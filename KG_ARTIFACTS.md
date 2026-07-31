@@ -13,7 +13,7 @@ Persistent across the project. Read from, not re-derived, on every task.
 | A-001 | Target sites are publicly accessible, no auth required | Industry directories are public | 100% | scraper/engine.py, scraper/targets.py | Confirmed |
 | A-002 | Enrichment API returns data for majority of Indian companies | Market research assumption | 75% | pipeline.py (enrichment step) | Pending |
 | A-003 | Pipeline runs on system with network access to all targets + APIs | Deployment environment | 100% | All | Confirmed |
-| A-004 | India-only scope — no non-Indian directories | Spec constraint | 100% | config/targets.yml | Confirmed |
+| A-004 | India-only scope — no non-Indian directories | Spec constraint | 100% | config/targets.yaml | Confirmed |
 | A-005 | LinkedIn data out of scope for v1 | Spec decision | 100% | N/A | Confirmed |
 | A-006 | Email verification (SMTP) out of scope for v1 | Spec decision | 100% | validation.py | Confirmed |
 | A-007 | CRM sync out of scope for v1 | Spec decision | 100% | N/A | Confirmed |

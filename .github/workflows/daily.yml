@@ -14,8 +14,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       DB_PATH: "data/leads.db"
-      TARGETS_CONFIG: "config/targets.yml"
-      SCRAPE_FULL_PAGES: "true"
+      TARGETS_CONFIG: "config/targets.yaml"
       WEBSHARE_PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL || '' }}
       WEBSHARE_PROXY_LIST: ${{ secrets.WEBSHARE_PROXY_LIST || '' }}
       WEBSHARE_API_KEY: ${{ secrets.WEBSHARE_API_KEY || '' }}
@@ -43,11 +42,32 @@ jobs:
       - name: Pin neo4j driver
         run: pip install neo4j==5.20.0
 
+      - name: Restore request counts from R2
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/request_counts.json data/request_counts.json \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto || true
+
       - name: Run pipeline
         run: python -m src --pipeline 2>&1
 
       - name: Build dashboard
         run: python build_dashboard.py 2>&1
+
+      - name: Upload request counts to R2
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp data/request_counts.json s3://${{ secrets.R2_BUCKET_NAME }}/request_counts.json \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto || true
 
       - name: Upload debug output
         if: always()

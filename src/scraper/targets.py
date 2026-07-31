@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from typing import Callable
 from urllib.parse import urlparse
 
 from scrapling.fetchers import StealthySession
@@ -321,6 +322,7 @@ def _extract_detail_urls(
 
 def _enrich_from_detail_pages(
     session, records: list[RawRecord], targets: list[tuple[int, str]], timeout: int,
+    cap_guard: Callable[[], bool] | None = None,
 ):
     """Scrape company profile pages to extract phone, email, and website.
 
@@ -328,6 +330,9 @@ def _enrich_from_detail_pages(
     it with the detail page URL. Only sets website to external company
     domains (never directory domains). Rejects known site-wide values
     (e.g. helpdesk@tradeindia.com, 01146710423) that appear on every page.
+
+    When cap_guard is provided (FR-008), it consumes one request unit per
+    fetch; once it denies, remaining detail pages are skipped and logged.
     """
     should_close = session is None
     s = session or StealthySession(
@@ -337,6 +342,9 @@ def _enrich_from_detail_pages(
         if should_close:
             s.__enter__()
         for idx, url in targets:
+            if cap_guard is not None and not cap_guard():
+                logger.info("Daily cap reached — skipping remaining detail-page enrichment")
+                break
             if idx >= len(records):
                 continue
             rec = records[idx]
@@ -395,11 +403,17 @@ def _enrich_from_detail_pages(
 # httpx enrichment fallback for IndiaMART (browser detail pages fail)
 # ---------------------------------------------------------------------------
 
-def _enrich_indiamart_via_httpx(records: list[RawRecord], proxy: str | None = None) -> int:
+def _enrich_indiamart_via_httpx(
+    records: list[RawRecord], proxy: str | None = None,
+    cap_guard: Callable[[], bool] | None = None,
+) -> int:
     """Enrich IndiaMART records with phone numbers from detail pages via httpx.
 
     IndiaMART detail pages block browser body retrieval but serve HTML fine
     to plain httpx requests. This extracts phones from the raw HTML.
+
+    When cap_guard is provided (FR-008), each request to the domain consumes
+    one unit; once denied, remaining enrichment is skipped and logged.
     """
     needy = [(i, r) for i, r in enumerate(records) if not r.phone]
     if not needy:
@@ -409,6 +423,10 @@ def _enrich_indiamart_via_httpx(records: list[RawRecord], proxy: str | None = No
         import httpx
     except ImportError:
         logger.warning("httpx not available — skipping IndiaMART enrichment")
+        return 0
+
+    if cap_guard is not None and not cap_guard():
+        logger.info("Daily cap reached for IndiaMART — skipping httpx enrichment")
         return 0
 
     # Re-fetch listing page to get detail URLs (avoid storing in session)
@@ -433,6 +451,9 @@ def _enrich_indiamart_via_httpx(records: list[RawRecord], proxy: str | None = No
         httpx_kw["proxy"] = proxy
     with httpx.Client(**httpx_kw) as client:
         for idx, url in detail_targets:
+            if cap_guard is not None and not cap_guard():
+                logger.info("Daily cap reached for IndiaMART — skipping remaining httpx enrichment")
+                break
             if idx >= len(records):
                 continue
             rec = records[idx]
@@ -513,6 +534,72 @@ def _build_page_url(parser_name: str, base_url: str, page: int) -> str:
     }
     builder = builders.get(parser_name)
     return builder(base_url, page) if builder else base_url
+
+
+# ---------------------------------------------------------------------------
+# Start-URL expansion (FR-001/FR-003)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CrawlCombo:
+    """A single category × city start-URL combination for a directory site."""
+    site: str            # "indiamart" | "tradeindia"
+    category_slug: str
+    city_slug: str
+    url: str
+
+
+def expand_start_urls(
+    categories: list[dict],
+    cities: list[dict],
+    url_templates: dict[str, str],
+    sites: tuple[str, ...] = ("indiamart", "tradeindia"),
+) -> list[CrawlCombo]:
+    """Generate exactly one page-1 start URL per category × city combination.
+
+    Deterministic cross-product (category-major, city-minor) for IndiaMART and
+    TradeIndia, formatted from the site template. JustDial is excluded — its URL
+    generation and depth remain under Phase 2 mode logic (FR-004/SC-005).
+    """
+    if not categories or not cities:
+        logger.warning("No categories or cities configured for expansion — no start URLs generated")
+        return []
+
+    combos: list[CrawlCombo] = []
+    for site in sites:
+        template = (url_templates or {}).get(site, "")
+        if not template:
+            logger.warning("No url_template for site %r — skipping expansion", site)
+            continue
+        for cat in categories:
+            cat_slug = cat.get("slug", "")
+            cat_label = cat.get("labels", {}).get(site, cat_slug)
+            if not cat_label:
+                logger.warning("Category %r missing label for %r — skipping", cat_slug, site)
+                continue
+            for city in cities:
+                city_slug = city.get("slug", "")
+                city_label = city.get("labels", {}).get(site, city_slug)
+                if not city_label:
+                    logger.warning("City %r missing label for %r — skipping", city_slug, site)
+                    continue
+                params = {"category": cat_label, "city": city_label}
+                if site == "tradeindia":
+                    code = city.get("tradeindia_code", "")
+                    if not code:
+                        raise ValueError(
+                            f"City {city_slug!r} is missing 'tradeindia_code' but the "
+                            "TradeIndia url_template requires it"
+                        )
+                    params["code"] = code
+                url = template.format(**params)
+                combos.append(CrawlCombo(
+                    site=site,
+                    category_slug=cat_slug,
+                    city_slug=city_slug,
+                    url=url,
+                ))
+    return combos
 
 
 # ---------------------------------------------------------------------------

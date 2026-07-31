@@ -1,9 +1,12 @@
 """LeadSpider — Scrapling Spider for multi-category × multi-city lead scraping.
 
-Generates a Request per site/category/city/page combination from targets.yaml
-expansion config. Routes justdial/indiamart through AsyncStealthySession (proxy-
-enabled, CF-solving) and tradeindia through plain FetcherSession. Supports
-daily request caps, stop-on-empty-page, and JustDial conditional modes.
+Generates a page-1 Request per site/category/city combination from the
+top-level `categories`/`cities`/`url_templates` keys of targets.yaml
+(cross-product for IndiaMART/TradeIndia; JustDial's flow is governed by its
+Phase 2 mode logic). Routes justdial/indiamart through AsyncStealthySession
+(proxy-enabled, CF-solving) and tradeindia through plain FetcherSession.
+Pagination is lazy with early-stop, and per-domain daily request caps are
+enforced on every request to a domain.
 """
 
 import json
@@ -27,6 +30,7 @@ from src.scraper.targets import (
     _enrich_indiamart_via_httpx,
     _extract_detail_urls,
     _build_page_url,
+    expand_start_urls,
     BLOCKED_DOMAINS,
     KNOWN_SITE_WIDE_PHONES,
     KNOWN_SITE_WIDE_EMAILS,
@@ -100,11 +104,10 @@ def _proxy_key(proxy) -> str:
         return ""
 
 
-# URL templates per site — {category} and {city} replaced with site-specific labels
+# Fallback JustDial URL template (used by the ASN probe when the config omits it).
+# IndiaMART/TradeIndia templates are config-driven (config/targets.yaml `url_templates`).
 SITE_URL_TEMPLATES = {
     "justdial": "https://www.justdial.com/{city}/{category}/nct-10278073",
-    "indiamart": "https://dir.indiamart.com/{city}/{category}.html",
-    "tradeindia": "https://www.tradeindia.com/manufacturers/{category}.html",
 }
 
 
@@ -190,6 +193,14 @@ class DomainRequestCounter:
         self._save()
         return True
 
+    def snapshot(self) -> dict[str, int]:
+        """Return the per-domain counts, excluding internal markers.
+
+        The values are budget units consumed (reserved at request-enqueue time),
+        not a count of completed HTTP fetches. Used for run summaries (FR-008).
+        """
+        return {d: c for d, c in self._counts.items() if not d.startswith("__")}
+
     def asn_tested(self) -> bool:
         """True if the JustDial ASN test already completed today (FR-009)."""
         return self._counts.get("__jd_asn_test") == 1
@@ -214,9 +225,8 @@ class LeadSpider(Spider):
     def __init__(self, targets_config: list[dict]):
         self._targets_config = targets_config
         self._full_config = load_full_config()
-        self._expansion = self._full_config.get("expansion", {})
-        self._categories: list[dict] = self._expansion.get("categories", [])
-        self._cities: list[dict] = self._expansion.get("cities", [])
+        self._categories: list[dict] = self._full_config.get("categories", [])
+        self._cities: list[dict] = self._full_config.get("cities", [])
         self._url_templates: dict = self._full_config.get("url_templates", {})
         self._icp_categories = get_icp_categories(self._full_config)
         self._icp_cities = get_icp_cities(self._full_config)
@@ -229,6 +239,10 @@ class LeadSpider(Spider):
         self._bytes_fetched: dict[str, int] = {}
         self._fill_rates: dict[str, dict] = {}
         self._jd_mode: str = "unknown"
+        self._seen_target_names: dict[tuple[str, str, str], set[str]] = {}
+        self._early_stopped_targets: dict[tuple[str, str, str], str] = {}
+        self._cap_reached: set[str] = set()
+        self._reported_robots_disallowed: set[str] = set()
         super().__init__(crawldir=".scrapling_checkpoints")
 
     def configure_sessions(self, manager):
@@ -281,7 +295,10 @@ class LeadSpider(Spider):
 
     def _build_source_url(self, site_name: str, category_slug: str, city_slug: str | None) -> str:
         """Build the entry URL for a site/category/city combination."""
-        template = self._url_templates.get(site_name.lower(), "")
+        template = (
+            self._url_templates.get(site_name.lower(), "")
+            or SITE_URL_TEMPLATES.get(site_name.lower(), "")
+        )
         if not template:
             return ""
         cat_label = self._site_label(category_slug, site_name.lower(), "category")
@@ -405,7 +422,7 @@ class LeadSpider(Spider):
 
     async def start_requests(self):
         if not self._categories:
-            logger.warning("No categories configured in expansion — nothing to scrape")
+            logger.warning("No categories configured — nothing to scrape")
             return
 
         from src.scraper import engine as _engine_mod
@@ -413,22 +430,22 @@ class LeadSpider(Spider):
 
         for target in self._targets_config:
             name = target.get("name", "")
-            if not target.get("enabled", True):
+            if not target.get("enabled", False):
                 logger.info("%s is disabled in config — skipping", name)
                 continue
 
             site_key = name.lower()
             sid = SID_BY_NAME.get(site_key, f"{site_key}_session")
             parser_name = target["parser"]
-            pages = target.get("pages", 1)
-            if os.environ.get("SCRAPE_FULL_PAGES", "").lower() != "true":
-                pages = 1
             max_req = target.get("max_requests_per_day", 100)
             use_proxy = site_key in ("justdial", "indiamart")
             fetch_kwargs = target.get("fetch_kwargs", {})
 
-            # Determine which mode JustDial runs in (resolved once per run — T004)
+            # JustDial: unchanged — Phase 2 mode logic + eager `pages` loop (FR-004/SC-005).
             if site_key == "justdial":
+                pages = target.get("pages", 3)
+
+                # Determine which mode JustDial runs in (resolved once per run — T004)
                 if self._jd_mode == "unknown":
                     self._jd_mode = self._determine_jd_mode()
                 if self._jd_mode == "no_proxy":
@@ -457,84 +474,177 @@ class LeadSpider(Spider):
                             logger.warning("JustDial ASN test failed: %s", exc)
                     continue
 
-            _proxy_exhausted = False
+                _stop_site = False
+                _robots_cache: dict[str, bool] = {}
+
+                # For each category
+                for cat_item in self._categories:
+                    if _stop_site:
+                        break
+                    category_slug = cat_item["slug"]
+
+                    # For each city
+                    for city_item in self._cities:
+                        if _stop_site:
+                            break
+                        city_slug = city_item.get("slug", "")
+
+                        # Build the entry URL
+                        source_url = self._build_source_url(name, category_slug, city_slug)
+                        if not source_url:
+                            continue
+
+                        # Cached robots.txt check
+                        domain = source_url.split("/")[2] if "//" in source_url else site_key
+                        if domain not in _robots_cache:
+                            _robots_cache[domain] = is_robots_allowed(source_url)
+                        if not _robots_cache[domain]:
+                            logger.warning("Robots.txt disallows scraping %s — skipping", domain)
+                            if domain not in self._reported_robots_disallowed:
+                                self._reported_robots_disallowed.add(domain)
+                                self.scrape_errors.append(ScrapeError(
+                                    url=source_url, timestamp=now_utc(),
+                                    error_type="RobotsDisallowed",
+                                ))
+                            continue
+
+                        # Resolve the proxy once per combo (before the pages loop).
+                        proxy = self._proxy_for(sid)
+                        if not proxy:
+                            continue
+
+                        for page_num in range(1, pages + 1):
+                            # Domain request cap per page (FR-008) — every yielded
+                            # request consumes one unit, not one unit per combo.
+                            if not self._req_counter.allowed(domain, max_req):
+                                logger.info("Daily cap reached for %s (%d) — stopping", domain, max_req)
+                                self._cap_reached.add(domain)
+                                _stop_site = True
+                                break
+                            page_url = _build_page_url(parser_name, source_url, page_num)
+
+                            # Session kwargs via per-sid factory (structural isolation, no shared dict)
+                            per_page_fetch = fetch_kwargs
+                            if page_num > 1 and "wait_selector" in fetch_kwargs:
+                                per_page_fetch = dict(fetch_kwargs)
+                                per_page_fetch.pop("wait_selector", None)
+                            session_kwargs = _make_session_kwargs(sid, per_page_fetch, proxy)
+
+                            yield Request(
+                                page_url,
+                                sid=sid,
+                                meta=dict(
+                                    parser=parser_name,
+                                    source_url=source_url,
+                                    site_name=name,
+                                    category_slug=category_slug,
+                                    city_slug=city_slug,
+                                    fetch_kwargs=fetch_kwargs,
+                                    page=page_num,
+                                    pages_total=pages,
+                                    daily_cap=max_req,
+                                ),
+                                **session_kwargs,
+                            )
+                continue
+
+            # IndiaMART / TradeIndia: config-driven cross-product, lazy pagination (FR-003).
+            if site_key not in ("indiamart", "tradeindia"):
+                logger.warning("Unknown target site %r — skipping", site_key)
+                continue
+
+            max_pages = target.get("max_pages", 10)
+            if not isinstance(max_pages, int) or max_pages < 1:
+                logger.critical(
+                    "Config error: %s max_pages=%r must be an integer >= 1", name, max_pages,
+                )
+                self.scrape_errors.append(ScrapeError(
+                    url=self._url_templates.get(site_key, ""), timestamp=now_utc(),
+                    error_type="ConfigError",
+                ))
+                continue
+            try:
+                combos = expand_start_urls(
+                    self._categories, self._cities, self._url_templates, sites=(site_key,),
+                )
+            except ValueError as exc:
+                # Contract targets-config-schema §6: a malformed combo config fails
+                # loudly per site — the other enabled sites keep crawling.
+                logger.critical("Config error for %s: %s", name, exc)
+                self.scrape_errors.append(ScrapeError(
+                    url=self._url_templates.get(site_key, ""), timestamp=now_utc(),
+                    error_type="ConfigError",
+                ))
+                continue
+            _stop_site = False
             _robots_cache: dict[str, bool] = {}
 
-            # For each category
-            for cat_item in self._categories:
-                if _proxy_exhausted:
+            for combo in combos:
+                if _stop_site:
                     break
-                category_slug = cat_item["slug"]
+                source_url = combo.url
+                proxy = None
 
-                # For each city
-                cities_to_scrape = self._cities if site_key in ("justdial", "indiamart") else [{"slug": ""}]
-                for city_item in cities_to_scrape:
-                    if _proxy_exhausted:
-                        break
-                    city_slug = city_item.get("slug", "")
-
-                    # Build the entry URL
-                    source_url = self._build_source_url(name, category_slug, city_slug)
-                    if not source_url:
-                        continue
-
-                    # Cached robots.txt check
-                    domain = source_url.split("/")[2] if "//" in source_url else site_key
-                    if domain not in _robots_cache:
-                        _robots_cache[domain] = is_robots_allowed(source_url)
-                    if not _robots_cache[domain]:
-                        logger.warning("Robots.txt disallows scraping %s — skipping", domain)
+                # Cached robots.txt check (robots before cap — disallowed combos never consume the cap)
+                domain = source_url.split("/")[2] if "//" in source_url else site_key
+                if domain not in _robots_cache:
+                    _robots_cache[domain] = is_robots_allowed(source_url)
+                if not _robots_cache[domain]:
+                    logger.warning("Robots.txt disallows scraping %s — skipping", domain)
+                    if domain not in self._reported_robots_disallowed:
+                        self._reported_robots_disallowed.add(domain)
                         self.scrape_errors.append(ScrapeError(
                             url=source_url, timestamp=now_utc(),
                             error_type="RobotsDisallowed",
                         ))
-                        continue
+                    continue
 
-                    # Domain request cap (after robots — disallowed combos must not consume the cap)
-                    if not self._req_counter.allowed(domain, max_req):
-                        logger.info("Daily cap reached for %s (%d) — stopping", domain, max_req)
-                        _proxy_exhausted = True
+                # Domain request cap
+                if not self._req_counter.allowed(domain, max_req):
+                    logger.info("Daily cap reached for %s (%d) — stopping", domain, max_req)
+                    self._cap_reached.add(domain)
+                    _stop_site = True
+                    break
+
+                if use_proxy:
+                    proxy = self._proxy_for(sid)
+                    if not proxy:
+                        logger.error("IndiaMART requires a proxy but none configured — skipping all combos")
+                        self.scrape_errors.append(ScrapeError(
+                            url=source_url, timestamp=now_utc(),
+                            error_type="ProxyNotConfigured",
+                        ))
+                        _stop_site = True
                         break
 
-                    if use_proxy:
-                        proxy = self._proxy_for(sid)
-                        if not proxy:
-                            if site_key == "justdial":
-                                continue
-                            logger.error("IndiaMART requires a proxy but none configured — skipping all combos")
-                            self.scrape_errors.append(ScrapeError(
-                                url=source_url, timestamp=now_utc(),
-                                error_type="ProxyNotConfigured",
-                            ))
-                            _proxy_exhausted = True
-                            break
+                session_kwargs = _make_session_kwargs(sid, fetch_kwargs, proxy)
 
-                    for page_num in range(1, pages + 1):
-                        page_url = _build_page_url(parser_name, source_url, page_num)
+                # Lazy pagination: yield only page 1; pages 2+ come from `parse`.
+                yield Request(
+                    source_url,
+                    sid=sid,
+                    meta=dict(
+                        parser=parser_name,
+                        source_url=source_url,
+                        site_name=name,
+                        category_slug=combo.category_slug,
+                        city_slug=combo.city_slug,
+                        fetch_kwargs=fetch_kwargs,
+                        page=1,
+                        pages_total=max_pages,
+                        daily_cap=max_req,
+                    ),
+                    **session_kwargs,
+                )
 
-                        # Session kwargs via per-sid factory (structural isolation, no shared dict)
-                        per_page_fetch = fetch_kwargs
-                        if page_num > 1 and "wait_selector" in fetch_kwargs:
-                            per_page_fetch = dict(fetch_kwargs)
-                            per_page_fetch.pop("wait_selector", None)
-                        session_kwargs = _make_session_kwargs(sid, per_page_fetch, proxy if use_proxy else None)
-
-                        yield Request(
-                            page_url,
-                            sid=sid,
-                            meta=dict(
-                                parser=parser_name,
-                                source_url=source_url,
-                                site_name=name,
-                                category_slug=category_slug,
-                                city_slug=city_slug,
-                                fetch_kwargs=fetch_kwargs,
-                                page=page_num,
-                                pages_total=pages,
-                                daily_cap=max_req,
-                            ),
-                            **session_kwargs,
-                        )
+    def _cap_guard_for(self, domain: str, cap: int):
+        """Return a zero-arg guard that consumes one request unit per call (FR-008)."""
+        def _guard() -> bool:
+            allowed = self._req_counter.allowed(domain, cap)
+            if not allowed:
+                self._cap_reached.add(domain)
+            return allowed
+        return _guard
 
     async def parse(self, response):
         meta = response.meta
@@ -546,6 +656,9 @@ class LeadSpider(Spider):
         fetch_kwargs = meta.get("fetch_kwargs", {})
         page_num = meta.get("page", 1)
         pages_total = meta.get("pages_total", 1)
+        daily_cap = meta.get("daily_cap")
+        site_key = site_name.lower()
+        domain = source_url.split("/")[2] if "//" in source_url else site_key
 
         parser_func = PARSER_REGISTRY.get(parser_name)
         if not parser_func:
@@ -557,6 +670,11 @@ class LeadSpider(Spider):
 
         records = parser_func(response, source_url=source_url)
         if not records:
+            # Genuinely empty parsed page → early-stop for this target (spec Edge Case).
+            # A blocked/errored body never reaches parse — the engine retries it first,
+            # so it is never mistaken for an empty result (US2-AS4).
+            if site_key in ("indiamart", "tradeindia"):
+                self._early_stopped_targets[(site_key, category_slug, city_slug)] = "empty"
             return
 
         body = getattr(response, "html_content", None) or getattr(response, "text", b"")
@@ -587,6 +705,8 @@ class LeadSpider(Spider):
                 "detail_urls": [(base_idx + i, u) for i, u in detail_urls],
                 "source_url": source_url,
                 "fetch_kwargs": fetch_kwargs,
+                "domain": domain,
+                "daily_cap": daily_cap,
             })
 
         # Track fill rates for reporting
@@ -602,8 +722,72 @@ class LeadSpider(Spider):
             if rec.website:
                 self._fill_rates[site]["website"] += 1
 
-        if site_name.lower() == "justdial":
+        if site_key == "justdial":
             self._jd_stats["succeeded"] += 1
+
+        # Lazy pagination + early-stop (IndiaMART / TradeIndia only — FR-005/FR-006).
+        # JustDial's eager `pages` loop in start_requests governs its depth (FR-004).
+        if site_key in ("indiamart", "tradeindia"):
+            target_key = (site_key, category_slug, city_slug)
+            seen = self._seen_target_names.setdefault(target_key, set())
+            new_count = 0
+            for rec in tagged:
+                name = (rec.company_name or "").casefold().strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    new_count += 1
+
+            if new_count == 0:
+                # All listings on this page were already collected for this target.
+                self._early_stopped_targets[target_key] = "0_new"
+            elif page_num >= pages_total:
+                pass  # configured max reached — no further pages (SC-002)
+            else:
+                next_page = page_num + 1
+                next_url = _build_page_url(parser_name, source_url, next_page)
+
+                sid = SID_BY_NAME.get(site_key, f"{site_key}_session")
+                # Resolve the proxy BEFORE consuming a cap unit — a stealth site
+                # with no proxy available cannot fetch the next page (FR-008).
+                proxy = None
+                if sid in (SID_JUSTDIAL, SID_INDIAMART):
+                    proxy = self._proxy_for(sid)
+
+                if sid in (SID_JUSTDIAL, SID_INDIAMART) and proxy is None:
+                    # No proxy left for a stealth next page — stop this target
+                    # gracefully instead of raising mid-generator.
+                    logger.warning(
+                        "No proxy available for %s — pagination stops at page %d for %s/%s/%s",
+                        site_name, page_num, site_key, category_slug, city_slug,
+                    )
+                    self._early_stopped_targets[target_key] = "no_proxy"
+                elif daily_cap is not None and not self._req_counter.allowed(domain, daily_cap):
+                    # Hard stop per domain — remaining pages for this domain not requested (FR-008)
+                    self._cap_reached.add(domain)
+                    self._early_stopped_targets[target_key] = "cap_reached"
+                else:
+                    per_page_fetch = fetch_kwargs
+                    if "wait_selector" in fetch_kwargs:
+                        per_page_fetch = dict(fetch_kwargs)
+                        per_page_fetch.pop("wait_selector", None)
+                    session_kwargs = _make_session_kwargs(sid, per_page_fetch, proxy)
+
+                    yield Request(
+                        next_url,
+                        sid=sid,
+                        meta=dict(
+                            parser=parser_name,
+                            source_url=source_url,
+                            site_name=site_name,
+                            category_slug=category_slug,
+                            city_slug=city_slug,
+                            fetch_kwargs=fetch_kwargs,
+                            page=next_page,
+                            pages_total=pages_total,
+                            daily_cap=daily_cap,
+                        ),
+                        **session_kwargs,
+                    )
 
         for rec in tagged:
             yield {
@@ -680,7 +864,7 @@ class LeadSpider(Spider):
         if resuming and self._jd_mode == "datacenter" and not self._req_counter.asn_tested():
             jd_target = next(
                 (t for t in self._targets_config
-                 if t.get("name", "").lower() == "justdial" and t.get("enabled", True)),
+                 if t.get("name", "").lower() == "justdial" and t.get("enabled", False)),
                 None,
             )
             if jd_target is not None:
@@ -711,17 +895,32 @@ class LeadSpider(Spider):
             if needy:
                 max_detail = fetch_kwargs.get("max_detail_pages", 20)
                 logger.info("TradeIndia: enriching %d records via detail pages (max %d)", len(needy), max_detail)
+                cap_guard = None
+                if entry.get("daily_cap") is not None:
+                    cap_guard = self._cap_guard_for(
+                        entry.get("domain", "www.tradeindia.com"), entry["daily_cap"],
+                    )
                 enriched = await anyio.to_thread.run_sync(
                     _enrich_from_detail_pages, None, self.all_records,
-                    needy[:max_detail], fetch_kwargs.get("timeout", 90000),
+                    needy[:max_detail], fetch_kwargs.get("timeout", 90000), cap_guard,
                 )
 
-        # IndiaMART httpx enrichment
+        # IndiaMART httpx enrichment — runs at most once: it operates on the full
+        # record list and only ever re-reads records[0].source_url, so repeating it
+        # per _enrich_data entry would issue identical redundant requests.
         for entry in self._enrich_data:
             if entry["parser"] == "parse_indiamart":
                 from src.scraper.engine import _get_next_proxy
                 proxy = _get_next_proxy()
-                await anyio.to_thread.run_sync(_enrich_indiamart_via_httpx, self.all_records, proxy)
+                cap_guard = None
+                if entry.get("daily_cap") is not None:
+                    cap_guard = self._cap_guard_for(
+                        entry.get("domain", "dir.indiamart.com"), entry["daily_cap"],
+                    )
+                await anyio.to_thread.run_sync(
+                    _enrich_indiamart_via_httpx, self.all_records, proxy, cap_guard,
+                )
+                break
 
         # Recompute fill rates after enrichment
         self._fill_rates = {}
@@ -755,6 +954,26 @@ class LeadSpider(Spider):
             per_target = ", ".join(f"{k}={v:,}B" for k, v in self._bytes_fetched.items())
             total = sum(self._bytes_fetched.values())
             logger.info("Bytes fetched - %s | total=%s", per_target, f"{total:,}B")
+
+        # Per-domain daily cap summary (FR-008). Values are budget units reserved
+        # at request-enqueue time (crash-safe accounting), not completed fetches.
+        real_counts = self._req_counter.snapshot()
+        if real_counts:
+            logger.info(
+                "Daily request budget used per domain: %s",
+                ", ".join(f"{d}={c}" for d, c in sorted(real_counts.items())),
+            )
+        if self._cap_reached:
+            logger.warning(
+                "Daily cap reached for domain(s): %s",
+                ", ".join(sorted(self._cap_reached)),
+            )
+        if self._early_stopped_targets:
+            logger.info(
+                "Early-stopped targets (%d): %s",
+                len(self._early_stopped_targets),
+                ", ".join(f"{s}/{cat}/{city}" for (s, cat, city) in sorted(self._early_stopped_targets)),
+            )
 
         # JustDial summary (FR-005/FR-006 datacenter verdict; residential crawl summary)
         if self._jd_mode == "datacenter":

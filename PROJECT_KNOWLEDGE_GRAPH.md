@@ -9,7 +9,7 @@ ENTITIES:
 - ScrapeError: A record of a scrape failure for a target URL. Fields: url, timestamp, error_type. Source: src/models.py:59
 - RejectedDuplicate: A record of a duplicate rejected during dedup. Fields: dedup_key, kept_company, rejected_company, reason, timestamp. Source: src/models.py:67
 - InvalidRecord: NamedTuple for a validation failure. Fields: record (LeadRecord), reason (str). Source: src/validation.py:10
-- TargetSite: A configured business directory. Fields: name, entry_url, parser (registered parser function), pages, fetch_kwargs (timeout, max_detail_pages, page_delay, target_delay). Source: config/targets.yml
+- TargetSite: A configured business directory. Fields: name, entry_url, parser (registered parser function), pages, fetch_kwargs (timeout, max_detail_pages, page_delay, target_delay). Source: config/targets.yaml
 - DatabaseClient: SQLite client mirroring SheetsClient interface. Manages Leads, staging, scrape_errors, rejected_duplicates. Source: src/database/client.py:18
 - GraphCompany (Neo4j): Graph node representing a company. Fields: dedup_key (unique), company_name, website, address, industry_code, source_url, scraped_at. Source: src/graphdb/client.py:58 — MERGE ON dedup_key
 - GraphPhone (Neo4j): Graph node. Fields: number (unique). Source: src/graphdb/client.py:98
@@ -80,7 +80,7 @@ CONTRACTS/SPECS:
 - Parser interface: registered parser function (response, source_url) -> list[RawRecord]. 3 registered: parse_justdial, parse_indiamart, parse_tradeindia. Retry in scrape_target(): 3 attempts, 429→30s/60s waits, empty 200→5s wait, exception→10s wait. Source: src/scraper/targets.py:475
 - StealthySession kwargs: headless=True, solve_cloudflare=True, load_dom=True, network_idle=True, capture_xhr=.*. Source: src/scraper/targets.py:488
 - IndiaMART httpx enrichment: Called automatically after browser scrape. Fetches listing page via StealthySession, extracts detail URLs, fetches each via httpx, extracts Indian mobile phones via regex (?:\+?91[-\s]?)?[6-9]\d{9}. Non-destructive (only sets phone if missing). Source: src/scraper/targets.py:388
-- Detail page enrichment (browser): max_detail_pages=0 for all 3 sites (disabled). Source: config/targets.yml
+- Detail page enrichment (browser): max_detail_pages=0 for all 3 sites (disabled). Source: config/targets.yaml
 - DatabaseClient interface: ensure_tab(), clear_tab(), append_rows(), get_all_rows(), read_existing_dedup_keys(), append_if_not_duplicate(). Source: src/database/client.py:18
 - SQLite schema: Leads (12 cols), staging (12 cols), scrape_errors (3 cols), rejected_duplicates (5 cols). Staging cleared each run; production via append_if_not_duplicate. Source: src/database/tabs.py, src/database/client.py:116
 - Lead scoring formula: 40*has_email + 20*has_phone + 20*(10<=emp_count<=500) + 20*(industry in target_list), max 100. Deterministic. Source: src/scoring.py:5
@@ -111,10 +111,10 @@ BUSINESS RULES / CONSTRAINTS:
 - BR-013: Empty company_name OR (both email and phone empty) → reject row, log reason. Source: src/validation.py:36
 - BR-014: Staging tab cleared before each write; production append-only via dedup_key check. Source: src/database/tabs.py:39, src/database/client.py:116
 - BR-015: All records without a dedup_key pass through dedup as-is (never dropped). Source: src/pipeline.py:56
-- BR-016: India-only scope — all target sites are Indian business directories. Source: config/targets.yml
+- BR-016: India-only scope — all target sites are Indian business directories. Source: config/targets.yaml
 - BR-017: Site-wide contact values MUST be rejected during enrichment — KNOWN_SITE_WIDE_PHONES = {"01146710423"}, KNOWN_SITE_WIDE_EMAILS = {"helpdesk@tradeindia.com"}. Source: src/scraper/targets.py:42
 - BR-018: Directory/social domains MUST NOT be assigned as company website — DIRECTORY_DOMAINS filters facebook.com, twitter.com, linkedin.com, youtube.com, justdial.com, indiamart.com, tradeindia.com, google.com, whatsapp.com, googletagmanager.com, schema.org. Source: src/scraper/targets.py:34
-- BR-019: Browser detail page enrichment is disabled (max_detail_pages=0) — body retrieval always fails with Protocol error in this network environment. IndiaMART uses httpx fallback instead. Source: config/targets.yml
+- BR-019: Browser detail page enrichment is disabled (max_detail_pages=0) — body retrieval always fails with Protocol error in this network environment. IndiaMART uses httpx fallback instead. Source: config/targets.yaml
 - BR-020: Neo4j write is non-fatal — failure logs warning but pipeline continues. Source: run.py:92
 - BR-021: Neo4j upsert is idempotent — MERGE on dedup_key, SET overwrites properties. Source: src/graphdb/client.py:84
 - BR-022: run.py truncates all tables (DELETE FROM) before each write. Source: run.py:65

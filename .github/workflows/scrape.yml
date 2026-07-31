@@ -35,15 +35,25 @@ jobs:
         run: |
           aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/leads.db data/leads.db \
             --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
-            --region auto
+            --region auto || true
+
+      - name: Restore request counts from R2
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp s3://${{ secrets.R2_BUCKET_NAME }}/request_counts.json data/request_counts.json \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto || true
 
       - name: Run pipeline
         run: python run.py
         env:
           DB_PATH: data/leads.db
+          TARGETS_CONFIG: config/targets.yaml
           WEBSHARE_PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL }}
           WEBSHARE_API_KEY: ${{ secrets.WEBSHARE_API_KEY }}
-          SCRAPE_FULL_PAGES: ${{ vars.SCRAPE_FULL_PAGES }}
 
       - name: Upload database to R2
         env:
@@ -53,6 +63,17 @@ jobs:
           aws s3 cp data/leads.db s3://${{ secrets.R2_BUCKET_NAME }}/leads.db \
             --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
             --region auto
+
+      - name: Upload request counts to R2
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp data/request_counts.json s3://${{ secrets.R2_BUCKET_NAME }}/request_counts.json \
+            --endpoint-url https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com \
+            --region auto || true
 
       - name: Build dashboard
         run: python build_dashboard.py

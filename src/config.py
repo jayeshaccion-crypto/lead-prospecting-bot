@@ -22,7 +22,7 @@ def load_targets_config(path: str | None = None) -> list[dict]:
 
     Args:
         path: Path to the YAML config file. If None, uses TARGETS_CONFIG env
-              var or defaults to 'config/targets.yml'.
+              var or defaults to 'config/targets.yaml'.
 
     Returns:
         List of target config dicts, or empty list if file not found.
@@ -44,7 +44,7 @@ def load_full_config(path: str | None = None) -> dict:
         The full parsed config dict, or empty dict if not found.
     """
     if path is None:
-        path = os.environ.get("TARGETS_CONFIG", "config/targets.yml")
+        path = os.environ.get("TARGETS_CONFIG", "config/targets.yaml")
     config_file = Path(path)
     if not config_file.exists():
         print(f"WARNING: Targets config not found at {config_file}. No targets will be scraped.")
@@ -60,11 +60,9 @@ def get_icp_categories(config: dict | None = None) -> set[str]:
     """Return the set of ICP category slugs from config."""
     if config is None:
         config = load_full_config()
-    icp = config.get("icp", {})
-    if isinstance(icp, dict):
-        cats = icp.get("categories", [])
-        if isinstance(cats, list):
-            return {c["slug"] if isinstance(c, dict) else str(c) for c in cats}
+    cats = config.get("icp_categories", [])
+    if isinstance(cats, list):
+        return {c["slug"] if isinstance(c, dict) else str(c) for c in cats}
     return set()
 
 
@@ -72,9 +70,7 @@ def get_icp_cities(config: dict | None = None) -> set[str]:
     """Return the set of ICP city slugs from config."""
     if config is None:
         config = load_full_config()
-    icp = config.get("icp", {})
-    if isinstance(icp, dict):
-        cities = icp.get("cities", [])
-        if isinstance(cities, list):
-            return {c["slug"] if isinstance(c, dict) else str(c) for c in cities}
+    cities = config.get("icp_cities", [])
+    if isinstance(cities, list):
+        return {c["slug"] if isinstance(c, dict) else str(c) for c in cities}
     return set()

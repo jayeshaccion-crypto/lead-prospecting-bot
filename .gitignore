@@ -13,3 +13,18 @@ scripts/check_jd_data.py
 scripts/diagnose.py
 scripts/enrich_test*.py
 .scrapling_checkpoints/
+
+# Python virtualenvs / tooling caches
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Daily cap state (runtime artifact, keyed by date)
+data/request_counts.json
+
+# OS files
+.DS_Store
+Thumbs.db

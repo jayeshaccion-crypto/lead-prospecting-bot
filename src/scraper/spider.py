@@ -12,6 +12,7 @@ import os
 import time
 from collections import defaultdict
 from typing import Callable
+from urllib.parse import urlsplit
 
 import anyio
 
@@ -61,6 +62,43 @@ DOMAIN_DELAYS: dict[str, tuple[float, float]] = {
 # this restores the pre-migration transient/WAF block superset so Cloudflare
 # challenges (403) and server errors are also retried up to max_blocked_retries.
 BLOCKED_STATUS_CODES = (401, 403, 407, 429, 444, 500, 502, 503, 504)
+
+# ASN confirmation test (datacenter mode) — bounded probe budget (FR-004) and the
+# exact end-of-run strings (FR-005/FR-006/FR-008), shared by spider + tests.
+ASN_PROBE_MAX = 10
+
+ASN_VERDICT = (
+    "JustDial: {X}/10 distinct proxy IPs attempted, {Y} blocked (body<500B), {Z} succeeded."
+)
+ASN_CONCLUSION = (
+    "CONCLUSION: JustDial block is ASN-level — datacenter proxies cannot bypass "
+    "regardless of specific IP. Residential proxy required."
+)
+
+JD_MODE_DISPLAY = {
+    "residential": "residential",
+    "datacenter": "datacenter-ASN-test",
+    "no_proxy": "no_proxy",
+}
+
+
+def _proxy_key(proxy) -> str:
+    """Credential-free ``host:port`` key for a proxy URL ('' for empty/invalid).
+
+    Handles credentialed (``http://user:pass@host:8080``), credential-less
+    (``http://host:8080``), and scheme-less (``host:8080``) forms. Used both for
+    deduplication and for redacted logging (constitution III).
+    """
+    text = str(proxy).strip()
+    if not text or not proxy:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        return urlsplit(text).netloc.rpartition("@")[-1]
+    except ValueError:
+        return ""
+
 
 # URL templates per site — {category} and {city} replaced with site-specific labels
 SITE_URL_TEMPLATES = {
@@ -152,6 +190,15 @@ class DomainRequestCounter:
         self._save()
         return True
 
+    def asn_tested(self) -> bool:
+        """True if the JustDial ASN test already completed today (FR-009)."""
+        return self._counts.get("__jd_asn_test") == 1
+
+    def mark_asn_tested(self) -> None:
+        """Persist the once-per-calendar-day JustDial ASN-test flag (FR-009)."""
+        self._counts["__jd_asn_test"] = 1
+        self._save()
+
 
 class LeadSpider(Spider):
     name = "lead_spider"
@@ -182,7 +229,6 @@ class LeadSpider(Spider):
         self._bytes_fetched: dict[str, int] = {}
         self._fill_rates: dict[str, dict] = {}
         self._jd_mode: str = "unknown"
-        self._jd_tested: bool = False
         super().__init__(crawldir=".scrapling_checkpoints")
 
     def configure_sessions(self, manager):
@@ -242,6 +288,121 @@ class LeadSpider(Spider):
         city_label = self._site_label(city_slug or "", site_name.lower(), "city") if city_slug else ""
         return template.format(category=cat_label, city=city_label)
 
+    def _jd_probe_url(self) -> str:
+        """FR-010: a single representative JustDial category-listing page (block detection)."""
+        template = self._url_templates.get("justdial") or SITE_URL_TEMPLATES.get("justdial", "")
+        if not template:
+            return ""
+        cat_slug = self._categories[0]["slug"] if self._categories else "b2b"
+        city_slug = self._cities[0].get("slug") if self._cities else "delhi"
+        cat_label = self._site_label(cat_slug, "justdial", "category")
+        city_label = self._site_label(city_slug, "justdial", "city")
+        return template.format(category=cat_label, city=city_label)
+
+    @staticmethod
+    def _dedupe_proxies(proxies: list[str]) -> list[str]:
+        """Distinct proxy URLs keyed by credential-free host:port."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in proxies:
+            key = _proxy_key(p)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
+
+    def _build_asn_candidates(self) -> list[str]:
+        """Distinct Webshare IPs for the probe (research R3, tasks T005).
+
+        Prefers distinct entries already in ``_PROXY_POOL`` (deduped). Only when the
+        pool is a single rotating endpoint (``WEBSHARE_PROXY_URL``) with no distinct
+        IPs does it call the Webshare API for the full list; if that call fails it
+        falls back to the pool's own entry (a single X=1 probe on the rotating
+        endpoint) instead of aborting the test.
+        """
+        from src.scraper import engine as _engine_mod
+        pool = _engine_mod._PROXY_POOL or []
+        distinct = self._dedupe_proxies(pool)
+        api_key = os.environ.get("WEBSHARE_API_KEY", "").strip()
+        rotating = os.environ.get("WEBSHARE_PROXY_URL", "").strip()
+        if len(distinct) <= 1 and api_key and rotating:
+            try:
+                fetched = _engine_mod._fetch_proxies_from_api(api_key)
+            except Exception as exc:
+                logger.warning(
+                    "JustDial ASN test: Webshare API fetch failed (%s) — falling back to the pool's rotating endpoint",
+                    exc,
+                )
+                fetched = []
+            if fetched:
+                distinct = self._dedupe_proxies(fetched)
+        return distinct[:ASN_PROBE_MAX]
+
+    async def _run_asn_test(self, timeout: int = 30000, page_delay: float = 2.0) -> None:
+        """FR-003/FR-004/FR-009/FR-010: bounded once-daily X/10 probe. Never crashes the run.
+
+        Reuses the Phase 1 ``justdial_session`` (AsyncStealthySession) via
+        ``SessionManager.fetch`` with a per-request ``proxy`` override — the same
+        mechanism ``retry_blocked_request`` uses — so no parallel fetch stack is built.
+        The once-per-day flag is persisted only after the probe completes, so a
+        skipped or aborted run leaves the day open for a later retry.
+        """
+        from scrapling.fetchers import ProxyRotator
+        from src.scraper import engine as _engine_mod
+
+        _engine_mod._init_proxy_pool()
+        candidates = self._build_asn_candidates()
+        if not candidates:
+            logger.warning("JustDial ASN test skipped: no distinct Webshare proxy IPs available")
+            return
+
+        probe_url = self._jd_probe_url()
+        if not probe_url:
+            logger.warning("JustDial ASN test skipped: no probe URL available")
+            return
+        if not is_robots_allowed(probe_url):
+            logger.warning("Robots.txt disallows the JustDial ASN probe URL — skipping")
+            self.scrape_errors.append(ScrapeError(
+                url=probe_url, timestamp=now_utc(), error_type="RobotsDisallowed",
+            ))
+            return
+
+        rotator = ProxyRotator(candidates)
+        x = y = z = 0
+        completed = False
+        try:
+            # One attempt per distinct IP (X == len(candidates), already capped at 10).
+            for _ in range(len(candidates)):
+                proxy = rotator.get_proxy()
+                if not proxy:
+                    break
+                x += 1
+                try:
+                    response = await self._session_manager.fetch(Request(
+                        probe_url,
+                        sid=SID_JUSTDIAL,
+                        proxy=proxy,
+                        timeout=timeout,
+                        wait=max(int(page_delay * 1000), 2000),
+                        meta={"asn_probe": True},
+                    ))
+                    if await self.is_blocked(response):
+                        self._jd_stats["blocked_ips"].add(_proxy_key(proxy))
+                        y += 1
+                    else:
+                        z += 1
+                except Exception:
+                    y += 1
+            completed = True
+        except Exception as exc:
+            logger.warning("JustDial ASN test error: %s", exc)
+        finally:
+            self._jd_stats["asn_attempted"] = x
+            self._jd_stats["asn_blocked"] = y
+            self._jd_stats["asn_succeeded"] = z
+            if completed:
+                self._req_counter.mark_asn_tested()
+
     async def start_requests(self):
         if not self._categories:
             logger.warning("No categories configured in expansion — nothing to scrape")
@@ -266,16 +427,34 @@ class LeadSpider(Spider):
             use_proxy = site_key in ("justdial", "indiamart")
             fetch_kwargs = target.get("fetch_kwargs", {})
 
-            # Determine which mode JustDial runs in
+            # Determine which mode JustDial runs in (resolved once per run — T004)
             if site_key == "justdial":
-                self._jd_mode = self._determine_jd_mode()
+                if self._jd_mode == "unknown":
+                    self._jd_mode = self._determine_jd_mode()
                 if self._jd_mode == "no_proxy":
-                    logger.warning("Justdial requires a proxy but none configured — skipping")
+                    logger.warning(
+                        "Justdial requires a proxy but none configured "
+                        "(RESIDENTIAL_PROXY_URL_JUSTDIAL and WEBSHARE_PROXY_URL / "
+                        "WEBSHARE_PROXY_LIST / WEBSHARE_API_KEY) — skipping"
+                    )
                     self.scrape_errors.append(ScrapeError(
                         url=target.get("entry_url", ""),
                         timestamp=now_utc(),
                         error_type="ProxyNotConfigured",
                     ))
+                    continue
+                if self._jd_mode == "datacenter":
+                    # FR-003/FR-009: probe at most once per calendar day; zero crawl requests.
+                    if self._req_counter.asn_tested():
+                        logger.info("JustDial ASN test already ran today — skipping")
+                    else:
+                        try:
+                            await self._run_asn_test(
+                                timeout=int(fetch_kwargs.get("timeout", 90000)),
+                                page_delay=float(fetch_kwargs.get("page_delay", 2.0)),
+                            )
+                        except Exception as exc:
+                            logger.warning("JustDial ASN test failed: %s", exc)
                     continue
 
             _proxy_exhausted = False
@@ -295,8 +474,6 @@ class LeadSpider(Spider):
                     city_slug = city_item.get("slug", "")
 
                     # Build the entry URL
-                    if site_key == "justdial" and self._jd_mode == "datacenter" and self._jd_tested:
-                        continue
                     source_url = self._build_source_url(name, category_slug, city_slug)
                     if not source_url:
                         continue
@@ -358,10 +535,6 @@ class LeadSpider(Spider):
                             ),
                             **session_kwargs,
                         )
-
-                # JustDial ASN test: only run one category in datacenter mode
-                if site_key == "justdial" and self._jd_mode == "datacenter":
-                    self._jd_tested = True
 
     async def parse(self, response):
         meta = response.meta
@@ -477,7 +650,7 @@ class LeadSpider(Spider):
         site_name = SITE_NAMES.get(sid, sid)
         body = response.body
         body_size = len(body) if isinstance(body, bytes) else len(str(body).encode("utf-8"))
-        log_proxy = str(proxy).partition("@")[-1] if proxy else "none"
+        log_proxy = _proxy_key(proxy) if proxy else "none"
 
         retry_note = "retrying with next proxy" if sid in (SID_JUSTDIAL, SID_INDIAMART) else "retrying"
         logger.warning(
@@ -501,7 +674,24 @@ class LeadSpider(Spider):
                 len(self._targets_config), len(self._categories), len(self._cities),
             )
         self._jd_mode = self._determine_jd_mode()
-        logger.info("JustDial mode: %s", self._jd_mode)
+        logger.info("JustDial mode: %s", JD_MODE_DISPLAY.get(self._jd_mode, self._jd_mode))
+        # A crash mid-probe (before the flag write) + checkpoint resume skips
+        # start_requests(), so re-run the ASN test here to salvage the day.
+        if resuming and self._jd_mode == "datacenter" and not self._req_counter.asn_tested():
+            jd_target = next(
+                (t for t in self._targets_config
+                 if t.get("name", "").lower() == "justdial" and t.get("enabled", True)),
+                None,
+            )
+            if jd_target is not None:
+                fk = jd_target.get("fetch_kwargs", {})
+                try:
+                    await self._run_asn_test(
+                        timeout=int(fk.get("timeout", 90000)),
+                        page_delay=float(fk.get("page_delay", 2.0)),
+                    )
+                except Exception as exc:
+                    logger.warning("JustDial ASN test failed during resume: %s", exc)
 
     async def on_close(self):
         # TradeIndia detail page enrichment using FetcherSession
@@ -566,24 +756,30 @@ class LeadSpider(Spider):
             total = sum(self._bytes_fetched.values())
             logger.info("Bytes fetched - %s | total=%s", per_target, f"{total:,}B")
 
-        # JustDial summary
-        blocked_ips = self._jd_stats.get("blocked_ips", set())
-        blocked = self._jd_stats.get("blocked", 0)
-        succeeded = self._jd_stats.get("succeeded", 0)
-        distinct_blocked_ips = len(blocked_ips)
-        if distinct_blocked_ips + blocked + succeeded > 0:
-            logger.info(
-                "JustDial: %d distinct proxy IPs hit block pages, %d blocked events (body<500B), %d succeeded",
-                distinct_blocked_ips, blocked, succeeded,
-            )
-            if succeeded == 0 and distinct_blocked_ips > 0:
-                logger.warning(
-                    "CONCLUSION: JustDial block is ASN-level — datacenter proxies cannot "
-                    "bypass regardless of specific IP. Residential proxy tier required."
+        # JustDial summary (FR-005/FR-006 datacenter verdict; residential crawl summary)
+        if self._jd_mode == "datacenter":
+            x = self._jd_stats.get("asn_attempted", 0)
+            if x > 0:
+                y = self._jd_stats.get("asn_blocked", 0)
+                z = self._jd_stats.get("asn_succeeded", 0)
+                logger.info(ASN_VERDICT.format(X=x, Y=y, Z=z))
+                if y == x:
+                    logger.warning(ASN_CONCLUSION)
+        else:
+            blocked_ips = self._jd_stats.get("blocked_ips", set())
+            blocked = self._jd_stats.get("blocked", 0)
+            succeeded = self._jd_stats.get("succeeded", 0)
+            distinct_blocked_ips = len(blocked_ips)
+            if distinct_blocked_ips + blocked + succeeded > 0:
+                logger.info(
+                    "JustDial: %d distinct proxy IPs hit block pages, %d blocked events (body<500B), %d succeeded",
+                    distinct_blocked_ips, blocked, succeeded,
                 )
+                if succeeded == 0 and distinct_blocked_ips > 0:
+                    logger.warning(ASN_CONCLUSION)
 
-        # JD mode report
-        logger.info("JustDial mode: %s", self._jd_mode)
+        # JD mode report (FR-008)
+        logger.info("JustDial mode: %s", JD_MODE_DISPLAY.get(self._jd_mode, self._jd_mode))
 
         if self.crawldir is not None:
             logger.info("Checkpointing configured (crawldir=%s)", self.crawldir)

@@ -9,14 +9,21 @@ site URLs as company websites.
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 import re
 import time
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from scrapling.fetchers import StealthySession
 
 logger = logging.getLogger(__name__)
+
+_DEBUG_OUTPUT_DIR = Path("debug_output")
+try:
+    _DEBUG_OUTPUT_DIR.mkdir(exist_ok=True)
+except OSError:
+    pass
 
 
 @dataclass
@@ -28,6 +35,7 @@ class RawRecord:
     address: str | None = None
     industry_code: str | None = None
     source_url: str | None = None
+    detail_url: str | None = None
 
 
 PARSER_REGISTRY: dict[str, callable] = {}
@@ -35,13 +43,33 @@ PARSER_REGISTRY: dict[str, callable] = {}
 DIRECTORY_DOMAINS = {
     "facebook.com", "twitter.com", "linkedin.com", "instagram.com",
     "youtube.com", "justdial.com", "indiamart.com", "tradeindia.com",
+    "tistatic.com", "tradeudhaar.com", "getdistributors.com",
     "google.com", "whatsapp.com", "googletagmanager.com", "schema.org",
+    "w3.org",
 }
 
 # Site-wide contact values that appear on every page of a directory site
 # Enrichment must reject these — they are not company-specific.
 KNOWN_SITE_WIDE_PHONES: set[str] = {"01146710423"}
 KNOWN_SITE_WIDE_EMAILS: set[str] = {"helpdesk@tradeindia.com"}
+
+
+def _clean_contact_values(
+    phone: str | None,
+    email: str | None,
+    website: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Reject known site-wide contact values (T009).
+
+    Applied at every boundary a value can enter the record — the listing
+    parsers AND the enrichment merge — so a polluted value captured earlier
+    (e.g. the helpdesk phone in a card's HTML) never survives into output.
+    """
+    if phone and phone in KNOWN_SITE_WIDE_PHONES:
+        phone = None
+    if email and email in KNOWN_SITE_WIDE_EMAILS:
+        email = None
+    return phone, email, website
 
 # Domains to block in the browser for faster page loads (analytics, tracking, ads)
 BLOCKED_DOMAINS: set[str] = {
@@ -158,7 +186,14 @@ def _is_directory_domain(domain: str) -> bool:
 
 
 def _extract_websites_from_text(text: str) -> list[str]:
-    """Extract company website URLs, filtering out directory/social domains."""
+    """Extract company website URLs, filtering out directory/social domains.
+
+    URLs inside <script>/<style> blocks are ignored — those are page chrome
+    (JSON-LD, analytics, CSS assets), not visible company content. On
+    directory sites the JSON-LD often carries the directory's own sameAs
+    links (Wikipedia, socials), which must never leak into the record.
+    """
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.S | re.I)
     urls = re.findall(r'https?://[-\w.%+]+[-\w/?=&+#]*', text)
     seen = set()
     result = []
@@ -266,6 +301,72 @@ def _find_cards_via_similarity(response, selectors: list[str]) -> list:
 # Detail URL extraction
 # ---------------------------------------------------------------------------
 
+def _detail_url_from_card(card, source_url: str) -> str | None:
+    """D1: resolve the company anchor's href against the listing URL.
+
+    `.company-url` is the candidate selector, `a[href]` (then h2/h3 links)
+    the fallback. A card whose anchor has no resolvable http(s) href yields
+    None (no detail request; field logged unavailable). Never overwrites
+    `source_url` — this is a separate per-record attribute.
+    """
+    for sel in (".company-url", "a[href]", "h2 a", "h3 a"):
+        el = card.css(sel).first
+        if el is None:
+            continue
+        try:
+            href = el.attrib.get("href", "")
+        except Exception:
+            href = ""
+        if not href or not isinstance(href, str) or not href.strip():
+            continue
+        try:
+            resolved = urljoin(source_url or "", href.strip())
+        except ValueError:
+            continue
+        if resolved.startswith("http://") or resolved.startswith("https://"):
+            return resolved
+    return None
+
+
+def _resolve_href(response, href: str) -> str:
+    """Resolve an anchor href against the response URL (relative or absolute)."""
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    base = getattr(response, "url", None) or ""
+    try:
+        return urljoin(base, href)
+    except ValueError:
+        return href
+
+
+def _pair_cards_to_records(
+    cards, records: list[RawRecord], name_selectors: str,
+    href_selectors: list[str], url_contains: str, base_idx: int,
+    resolve: callable,
+) -> list[tuple[int, str]]:
+    """Align card-derived detail URLs to records in the same order both were
+    built: cards and records both skip nameless entries, so the k-th named card
+    maps to the k-th record. Emits (global_index, resolved_url) in record order.
+    """
+    paired: list[tuple[int, str]] = []
+    rec_cursor = 0
+    for card in cards:
+        name_el = card.css(name_selectors).first
+        if name_el is None or not (name_el.text or "").strip():
+            continue
+        if rec_cursor >= len(records):
+            break
+        for sel in href_selectors:
+            link_el = card.css(sel).first
+            if link_el is None:
+                continue
+            href = link_el.attrib.get("href", "") or ""
+            if href and url_contains in href and not href.endswith("#"):
+                paired.append((base_idx + rec_cursor, resolve(href)))
+                break
+        rec_cursor += 1
+    return paired
+
 def _extract_detail_urls(
     parser_name: str, response, records: list[RawRecord], base_idx: int,
 ) -> list[tuple[int, str]]:
@@ -276,42 +377,46 @@ def _extract_detail_urls(
         state = _extract_initial_state(html)
         if not state or not isinstance(state, dict):
             return urls
-        items = state.get("data", [])
+        # Align with _parse_im_from_state (which skips non-dict/nameless items)
+        # so the item index equals the record index within this batch.
+        items = [it for it in state.get("data", [])
+                 if isinstance(it, dict) and (it.get("CMP") or "").strip()]
         for i, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
             s_url = (item.get("s_url") or "").strip()
             if s_url and "indiamart.com" in s_url:
-                url_idx = base_idx + i
-                if url_idx < len(records):
-                    profile_url = s_url.split("?")[0].rstrip("/") + "/"
-                    urls.append((url_idx, profile_url))
+                profile_url = s_url.split("?")[0].rstrip("/") + "/"
+                urls.append((base_idx + i, profile_url))
 
     elif parser_name == "parse_tradeindia":
-        for i, card in enumerate(response.css(".top-cont, [class*='company-card'], .card-list > div")):
-            for sel in [".company-url a", ".company-url", "a[href*='tradeindia.com']", "h2 a", "h3 a"]:
-                link_el = card.css(sel).first
-                if link_el is not None:
-                    href = link_el.attrib.get("href", "")
-                    if href and "tradeindia.com" in href:
-                        url_idx = base_idx + i
-                        if url_idx < len(records):
-                            full = href if href.startswith("http") else response.urljoin(href) if hasattr(response, "urljoin") else href
-                            urls.append((url_idx, full))
-                        break
+        # D1: prefer the per-record detail_url captured by the listing parser
+        # (contract detail-page-url.md) so the dispatch list matches record
+        # order on every page (base_idx > 0 included).
+        for i, rec in enumerate(records):
+            if rec.detail_url:
+                urls.append((base_idx + i, rec.detail_url))
+        if urls:
+            return urls
+        # Fallback: scan cards directly when the parser did not capture anchors.
+        cards = response.css(".top-cont, [class*='company-card'], .card-list > div")
+        urls = _pair_cards_to_records(
+            cards, records,
+            name_selectors=".company-url, a[href], h2, h3",
+            href_selectors=[".company-url a", ".company-url", "a[href*='tradeindia.com']", "h2 a", "h3 a"],
+            url_contains="tradeindia.com",
+            base_idx=base_idx,
+            resolve=lambda href: _resolve_href(response, href),
+        )
 
     elif parser_name == "parse_justdial":
-        for i, card in enumerate(response.css('[class*="listing-card"], [class*="card"], .jf-listing-card')):
-            for sel in ["a[href*='justdial.com'][href*='/']", "a[href]"]:
-                link_el = card.css(sel).first
-                if link_el is not None:
-                    href = link_el.attrib.get("href", "")
-                    if href and "justdial.com" in href and not href.endswith("#"):
-                        url_idx = base_idx + i
-                        if url_idx < len(records):
-                            full = href if href.startswith("http") else response.urljoin(href) if hasattr(response, "urljoin") else href
-                            urls.append((url_idx, full))
-                        break
+        cards = response.css('[class*="listing-card"], [class*="card"], .jf-listing-card')
+        urls = _pair_cards_to_records(
+            cards, records,
+            name_selectors=".company-name, .jf-business-name, h2 a, .name a, h2, h3, [class*='title'], a, strong",
+            href_selectors=["a[href*='justdial.com'][href*='/']", "a[href]"],
+            url_contains="justdial.com",
+            base_idx=base_idx,
+            resolve=lambda href: _resolve_href(response, href),
+        )
 
     return urls
 
@@ -320,61 +425,154 @@ def _extract_detail_urls(
 # Detail page enrichment
 # ---------------------------------------------------------------------------
 
+_REVEAL_CLICK_JS = """
+() => {
+  const btns = [...document.querySelectorAll('button')];
+  const target = btns.find(b => /View Numbers|View Number|Call/i.test(b.textContent || ''));
+  if (target) { target.click(); return true; }
+  return false;
+}
+"""
+
+
+def _click_reveal_button(page) -> bool:
+    """Single bounded click on the TradeIndia 'View Numbers' reveal control.
+
+    Q2: exactly one click, no retries; the captured get-user-mobile XHR
+    carries the revealed data (T003 evidence: js-reveal-button mechanism).
+    """
+    try:
+        return bool(page.evaluate(_REVEAL_CLICK_JS))
+    except Exception:
+        return False
+
+
+def _parse_reveal_xhr(resp) -> tuple[str | None, str | None]:
+    """Read default_mobile / default_email from the captured get-user-mobile XHR(s).
+
+    Fields are merged across matching XHRs so a response that carries only
+    phone (or only email) is still honored; the phone is validated against
+    the same 10+ digit rule used everywhere else.
+    """
+    xhr_list = getattr(resp, "captured_xhr", None) or []
+    phone = None
+    email = None
+    for x in xhr_list:
+        url = getattr(x, "url", "") or ""
+        if "get-user-mobile" not in url:
+            continue
+        body = getattr(x, "body", None) or getattr(x, "response", None) or ""
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not phone:
+            phone = _clean_phone((data.get("default_mobile") or "").strip())
+        if not email:
+            email = (data.get("default_email") or "").strip() or None
+        if phone and email:
+            break
+    return phone, email
+
+
 def _enrich_from_detail_pages(
     session, records: list[RawRecord], targets: list[tuple[int, str]], timeout: int,
     cap_guard: Callable[[], bool] | None = None,
-):
+    robots_allowed: Callable[[str], bool] | None = None,
+    reveal_js: bool = False,
+) -> dict[str, int]:
     """Scrape company profile pages to extract phone, email, and website.
 
     Preserves the original source_url (listing page) — does NOT overwrite
     it with the detail page URL. Only sets website to external company
     domains (never directory domains). Rejects known site-wide values
     (e.g. helpdesk@tradeindia.com, 01146710423) that appear on every page.
+    A field that stays empty is logged ``enrichment_unavailable: <field>``;
+    a fetch that returned no body logs ``detail_fetch_failed`` and an
+    extraction/parse exception logs ``detail_parse_error`` — those two are
+    never conflated with ``enrichment_unavailable`` (Constitution V).
 
     When cap_guard is provided (FR-008), it consumes one request unit per
     fetch; once it denies, remaining detail pages are skipped and logged.
+    When robots_allowed is provided, each URL is checked (Constitution I)
+    immediately before its fetch. When reveal_js is True (TradeIndia), the
+    page is rendered and the 'View Numbers' button is clicked once to
+    trigger the get-user-mobile XHR, which is the data source (T003).
     """
+    stats = {
+        "attempted": 0, "fetched": 0, "fetch_failed": 0,
+        "phone_unavailable": 0, "email_unavailable": 0, "website_unavailable": 0,
+    }
     should_close = session is None
-    s = session or StealthySession(
-        headless=True, solve_cloudflare=True, timeout=timeout, load_dom=True,
-    )
+    if reveal_js:
+        s = session or StealthySession(
+            headless=True, solve_cloudflare=True, timeout=timeout, load_dom=True,
+            network_idle=True, capture_xhr=r"get-user-mobile",
+        )
+    else:
+        s = session or StealthySession(
+            headless=True, solve_cloudflare=True, timeout=timeout, load_dom=True,
+        )
+    entered = False
     try:
         if should_close:
             s.__enter__()
+            entered = True
         for idx, url in targets:
-            if cap_guard is not None and not cap_guard():
-                logger.info("Daily cap reached — skipping remaining detail-page enrichment")
-                break
             if idx >= len(records):
                 continue
             rec = records[idx]
             if rec.phone and rec.email:
                 continue
+            if cap_guard is not None and not cap_guard():
+                logger.info("Daily cap reached — skipping remaining detail-page enrichment")
+                break
+            if robots_allowed is not None and not robots_allowed(url):
+                logger.warning("Robots.txt disallows detail page %s — skipping enrichment", url)
+                continue
+            stats["attempted"] += 1
             try:
-                page_resp = s.fetch(url, wait=1000)
-                if page_resp.html_content is None:
-                    logger.debug("No body for detail page %s — skipping enrichment", url)
+                if reveal_js:
+                    page_resp = s.fetch(url, wait=4000, page_action=_click_reveal_button)
+                else:
+                    page_resp = s.fetch(url, wait=1000)
+                html = str(page_resp.html_content or "")
+                if not html.strip() or html.strip() in ("None", ""):
+                    logger.warning("detail_fetch_failed: empty body for %s", url)
+                    stats["fetch_failed"] += 1
                     continue
-                html = str(page_resp.html_content)
-                if not html or html.strip() in ("None", ""):
-                    logger.debug("Empty body for detail page %s — skipping enrichment", url)
-                    continue
+                stats["fetched"] += 1
 
-                detail_phone = _extract_phone_from_html(html)
-                emails = _extract_emails_from_text(html)
-                detail_email = emails[0] if emails else None
+                if reveal_js:
+                    detail_phone, detail_email = _parse_reveal_xhr(page_resp)
+                else:
+                    detail_phone = _extract_phone_from_html(html)
+                    emails = _extract_emails_from_text(html)
+                    detail_email = emails[0] if emails else None
                 websites = _extract_websites_from_text(html)
                 detail_website = websites[0] if websites else None
 
-                # Reject known site-wide values that are not company-specific
-                if detail_phone and detail_phone in KNOWN_SITE_WIDE_PHONES:
-                    detail_phone = None
-                if detail_email and detail_email in KNOWN_SITE_WIDE_EMAILS:
-                    detail_email = None
+                # Reject known site-wide values at the merge boundary (T009):
+                # a polluted value captured at listing time must not survive.
+                phone, email, website = _clean_contact_values(
+                    detail_phone or rec.phone,
+                    detail_email or rec.email,
+                    detail_website or rec.website,
+                )
 
-                phone = detail_phone or rec.phone
-                email = detail_email or rec.email
-                website = detail_website or rec.website
+                if not phone:
+                    stats["phone_unavailable"] += 1
+                    logger.info('enrichment_unavailable: phone (record="%s", url="%s")', rec.company_name, url)
+                if not email:
+                    stats["email_unavailable"] += 1
+                    logger.info('enrichment_unavailable: email (record="%s", url="%s")', rec.company_name, url)
+                if not website:
+                    stats["website_unavailable"] += 1
+                    logger.info('enrichment_unavailable: website (record="%s", url="%s")', rec.company_name, url)
 
                 if phone != rec.phone or email != rec.email or website != rec.website:
                     records[idx] = RawRecord(
@@ -385,18 +583,20 @@ def _enrich_from_detail_pages(
                         address=rec.address,
                         industry_code=rec.industry_code,
                         source_url=rec.source_url,
+                        detail_url=rec.detail_url,
                     )
                     logger.info(
                         "Enriched %s -> phone=%s email=%s website=%s",
                         rec.company_name, phone or "—", email or "—", website or "—",
                     )
             except Exception as exc:
-                logger.debug("Failed detail page %s for %s: %s", url, rec.company_name, exc)
+                logger.error("detail_parse_error: failed %s for %s: %s", url, rec.company_name, exc)
             finally:
                 time.sleep(0.5)
     finally:
-        if should_close:
+        if should_close and entered:
             s.__exit__(None, None, None)
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +722,20 @@ def _save_debug_html(source_url: str, html: str) -> None:
         logger.info("Saved debug HTML to %s (%d chars)", path, len(html[:500000]))
     except Exception as exc:
         logger.debug("Failed to save debug HTML: %s", exc)
+
+
+def _save_rendered_html(name: str, html, out_dir: str = "debug_output") -> None:
+    """Save rendered DOM HTML to disk under a fixed name (evidence capture).
+
+    Pure capture helper for the detail-page inspection report (contract
+    detail-page-capture.md) — deliberately contains NO extraction logic.
+    """
+    try:
+        path = Path(out_dir) / name
+        path.write_text(str(html), encoding="utf-8")
+        logger.info("Saved rendered HTML to %s (%d chars)", path, len(str(html)))
+    except Exception as exc:
+        logger.debug("Failed to save rendered HTML %s: %s", name, exc)
 
 
 def _build_page_url(parser_name: str, base_url: str, page: int) -> str:
@@ -1256,6 +1470,7 @@ def _parse_ti_from_css(response, source_url: str) -> list[RawRecord]:
         email = emails[0] if emails else None
         websites = _extract_websites_from_text(card_html)
         website = websites[0] if websites else None
+        phone, email, _ = _clean_contact_values(phone, email)
 
         records.append(RawRecord(
             company_name=name[:200],
@@ -1265,6 +1480,7 @@ def _parse_ti_from_css(response, source_url: str) -> list[RawRecord]:
             address=_safe_str(city),
             industry_code=_safe_str(biz, max_len=200),
             source_url=source_url,
+            detail_url=_detail_url_from_card(card, source_url),
         ))
 
     if records:
@@ -1297,6 +1513,7 @@ def _parse_ti_via_similarity(response, source_url: str) -> list[RawRecord]:
         email = emails[0] if emails else None
         websites = _extract_websites_from_text(card_html)
         website = websites[0] if websites else None
+        phone, email, _ = _clean_contact_values(phone, email)
 
         h3s = card.css("h3")
         city = h3s[1].text.strip() if len(h3s) > 1 and h3s[1].text else ""
@@ -1314,6 +1531,7 @@ def _parse_ti_via_similarity(response, source_url: str) -> list[RawRecord]:
             address=_safe_str(city),
             industry_code=_safe_str(biz, max_len=200),
             source_url=source_url,
+            detail_url=_detail_url_from_card(card, source_url),
         ))
 
     if records:

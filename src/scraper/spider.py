@@ -238,6 +238,7 @@ class LeadSpider(Spider):
         self._enrich_data: list = []
         self._bytes_fetched: dict[str, int] = {}
         self._fill_rates: dict[str, dict] = {}
+        self._detail_enrich_stats: dict[str, int] = {}
         self._jd_mode: str = "unknown"
         self._seen_target_names: dict[tuple[str, str, str], set[str]] = {}
         self._early_stopped_targets: dict[tuple[str, str, str], str] = {}
@@ -879,12 +880,17 @@ class LeadSpider(Spider):
 
     async def on_close(self):
         # TradeIndia detail page enrichment using FetcherSession
+        # SC-001: the max_detail_pages cap is a per-RUN budget, shared across
+        # every parsed listing page (each page adds one _enrich_data entry).
+        detail_budget = None
         for entry in self._enrich_data:
             if entry["parser"] != "parse_tradeindia":
                 continue
             parser_name = entry["parser"]
             detail_urls = entry["detail_urls"]
             fetch_kwargs = entry["fetch_kwargs"]
+            if detail_budget is None:
+                detail_budget = int(fetch_kwargs.get("max_detail_pages", 20))
 
             needy = [
                 (i, u) for i, u in detail_urls
@@ -892,18 +898,31 @@ class LeadSpider(Spider):
                     self.all_records[i].phone and self.all_records[i].email
                 )
             ]
-            if needy:
-                max_detail = fetch_kwargs.get("max_detail_pages", 20)
-                logger.info("TradeIndia: enriching %d records via detail pages (max %d)", len(needy), max_detail)
-                cap_guard = None
-                if entry.get("daily_cap") is not None:
-                    cap_guard = self._cap_guard_for(
-                        entry.get("domain", "www.tradeindia.com"), entry["daily_cap"],
+            if detail_budget <= 0 or not needy:
+                if needy and detail_budget <= 0:
+                    logger.info(
+                        "TradeIndia: run detail budget (%d) exhausted — skipping remaining enrichment",
+                        detail_budget,
                     )
-                enriched = await anyio.to_thread.run_sync(
-                    _enrich_from_detail_pages, None, self.all_records,
-                    needy[:max_detail], fetch_kwargs.get("timeout", 90000), cap_guard,
+                continue
+            subset = needy[:detail_budget]
+            detail_budget -= len(subset)
+            max_detail = fetch_kwargs.get("max_detail_pages", 20)
+            logger.info("TradeIndia: enriching %d records via detail pages (max %d)", len(subset), max_detail)
+            cap_guard = None
+            if entry.get("daily_cap") is not None:
+                cap_guard = self._cap_guard_for(
+                    entry.get("domain", "www.tradeindia.com"), entry["daily_cap"],
                 )
+            # T010: robots gate precedes each detail fetch; T003: js-reveal click
+            # consumes the get-user-mobile XHR for phone+email (reveal_js=True).
+            stats = await anyio.to_thread.run_sync(
+                _enrich_from_detail_pages, None, self.all_records,
+                subset, fetch_kwargs.get("timeout", 90000), cap_guard,
+                is_robots_allowed, True,
+            )
+            for key, value in stats.items():
+                self._detail_enrich_stats[key] = self._detail_enrich_stats.get(key, 0) + value
 
         # IndiaMART httpx enrichment — runs at most once: it operates on the full
         # record list and only ever re-reads records[0].source_url, so repeating it
@@ -939,15 +958,41 @@ class LeadSpider(Spider):
             if rec.website:
                 self._fill_rates[site]["website"] += 1
 
-        # Log fill rates
+        # Seed a zero-row for every enabled target so a 0-record run is still
+        # reported (SC-003 0-records case) rather than silently omitted. The key
+        # is derived through SITE_NAMES exactly like the record loop above, so a
+        # config name can never produce a duplicate/divergent row.
+        for target in self._targets_config:
+            name = target.get("name", "")
+            if not name or not target.get("enabled", False):
+                continue
+            sid = SID_BY_NAME.get(name.lower())
+            key = SITE_NAMES.get(sid, name) if sid else name
+            if key not in self._fill_rates:
+                self._fill_rates[key] = {"total": 0, "phone": 0, "email": 0, "website": 0}
+
+        # Log fill rates (including 0/0 rows)
         for site, rates in sorted(self._fill_rates.items()):
             t = rates["total"]
-            if t:
-                logger.info(
-                    "%s: %d records, phone=%d/%d, email=%d/%d, website=%d/%d",
-                    site, t,
-                    rates["phone"], t, rates["email"], t, rates["website"], t,
-                )
+            logger.info(
+                "%s: %d records, phone=%d/%d, email=%d/%d, website=%d/%d",
+                site, t,
+                rates["phone"], t, rates["email"], t, rates["website"], t,
+            )
+
+        # TradeIndia detail enrichment unavailable/failure counts (distinct
+        # from fill-rate — only detail-page attempts, never listing-level gaps).
+        if self._detail_enrich_stats:
+            logger.info(
+                "TradeIndia detail enrichment: attempted=%d fetched=%d fetch_failed=%d "
+                "enrichment_unavailable phone=%d email=%d website=%d",
+                self._detail_enrich_stats.get("attempted", 0),
+                self._detail_enrich_stats.get("fetched", 0),
+                self._detail_enrich_stats.get("fetch_failed", 0),
+                self._detail_enrich_stats.get("phone_unavailable", 0),
+                self._detail_enrich_stats.get("email_unavailable", 0),
+                self._detail_enrich_stats.get("website_unavailable", 0),
+            )
 
         # Log byte totals
         if self._bytes_fetched:

@@ -1114,9 +1114,11 @@ class TestDailyCaps:
         assert calls == [1]
 
     def test_enrichment_detail_pages_count_against_cap(self):
-        """T014 — cap_guard gates each detail-page fetch."""
+        """T014 — cap_guard gates each detail-page fetch; a record that is
+        already enriched consumes no budget unit (L2 fix)."""
         from src.scraper.targets import _enrich_from_detail_pages
-        rec = RawRecord(company_name="C", phone=None, email=None)
+        rec0 = RawRecord(company_name="A", phone=None, email=None)
+        rec1 = RawRecord(company_name="B", phone=None, email=None)
         session = MagicMock()
         resp = MagicMock()
         resp.html_content = b"Contact: 9876543210, info@co.com"
@@ -1127,11 +1129,139 @@ class TestDailyCaps:
             calls.append(1)
             return len(calls) <= 1  # first fetch allowed, rest denied
 
-        targets = [(0, "https://detail.com/1"), (0, "https://detail.com/2")]
-        records = [rec]
+        targets = [(0, "https://detail.com/1"), (1, "https://detail.com/2")]
+        records = [rec0, rec1]
         _enrich_from_detail_pages(session, records, targets, timeout=30000, cap_guard=guard)
         assert session.fetch.call_count == 1  # second fetch denied → skipped
         assert len(calls) == 2
+
+    def test_cap_not_consumed_for_already_enriched_or_out_of_range(self):
+        """L2 — budget units are not spent on records already carrying phone+email."""
+        from src.scraper.targets import _enrich_from_detail_pages
+        rec = RawRecord(company_name="C", phone="9876543210", email="a@b.com")
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"Contact: 123, x@y.com"
+        session.fetch.return_value = resp
+        calls = []
+
+        def guard():
+            calls.append(1)
+            return True
+
+        _enrich_from_detail_pages(
+            session, [rec],
+            [(0, "https://detail.com/1"), (1, "https://detail.com/2"), (99, "https://detail.com/99")],
+            timeout=30000, cap_guard=guard,
+        )
+        session.fetch.assert_not_called()
+        assert calls == []  # cap_guard never invoked for skippable targets
+
+    def test_on_close_ti_enrichment_passes_robots_and_reveal_js(
+            self, small_config, isolated_counter, monkeypatch):
+        """T010/T003 — on_close gates detail fetches with robots AND reveals JS
+        (one click consumes the get-user-mobile XHR), aggregating the stats."""
+        import anyio
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([dict(TestStartRequests.TI)])
+        s.all_records = [RawRecord(company_name="Acme", phone=None, email=None)]
+        s._enrich_data = [{
+            "parser": "parse_tradeindia",
+            "detail_urls": [(0, "https://www.tradeindia.com/acme-1/")],
+            "fetch_kwargs": {"timeout": 90000, "max_detail_pages": 20},
+            "domain": "www.tradeindia.com",
+            "daily_cap": 10,
+        }]
+        captured = {}
+
+        def fake_enrich(session, records, targets, timeout, cap_guard, robots_allowed, reveal_js):
+            captured["robots_allowed"] = robots_allowed
+            captured["reveal_js"] = reveal_js
+            captured["targets"] = targets
+            return {"attempted": 1, "fetched": 1, "fetch_failed": 0,
+                    "phone_unavailable": 0, "email_unavailable": 0, "website_unavailable": 1}
+
+        monkeypatch.setattr(spider_mod, "_enrich_from_detail_pages", fake_enrich)
+        anyio.run(s.on_close)
+        assert captured["reveal_js"] is True
+        assert captured["robots_allowed"] is spider_mod.is_robots_allowed
+        assert captured["targets"] == [(0, "https://www.tradeindia.com/acme-1/")]
+        assert s._detail_enrich_stats["attempted"] == 1
+        assert s._detail_enrich_stats["fetched"] == 1
+        assert s._detail_enrich_stats["website_unavailable"] == 1
+
+    def test_on_close_seeds_zero_fill_rate_for_enabled_target(
+            self, small_config, isolated_counter, monkeypatch, caplog):
+        """SC-003 — a 0-record run still reports a 0/0 row for every enabled target."""
+        import anyio
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([{
+            "name": "TradeIndia", "enabled": True, "parser": "parse_tradeindia",
+            "pages": 1, "max_requests_per_day": 10,
+            "fetch_kwargs": {"timeout": 90000},
+        }])
+        assert s.all_records == []
+        with caplog.at_level(logging.INFO, logger="src.scraper.spider"):
+            anyio.run(s.on_close)
+        assert s._fill_rates["TradeIndia"] == {"total": 0, "phone": 0, "email": 0, "website": 0}
+        assert "TradeIndia: 0 records, phone=0/0, email=0/0, website=0/0" in caplog.text
+
+    def test_on_close_ti_global_detail_budget_across_entries(
+            self, small_config, isolated_counter, monkeypatch):
+        """SC-001/H2 — max_detail_pages is a per-RUN budget shared across every
+        _enrich_data entry, not a per-page budget."""
+        import anyio
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([dict(TestStartRequests.TI)])
+        s.all_records = [
+            RawRecord(company_name="A", phone=None, email=None),
+            RawRecord(company_name="B", phone=None, email=None),
+            RawRecord(company_name="C", phone=None, email=None),
+        ]
+        s._enrich_data = [
+            {"parser": "parse_tradeindia", "detail_urls": [(0, "u0"), (1, "u1")],
+             "fetch_kwargs": {"timeout": 90000, "max_detail_pages": 2},
+             "domain": "www.tradeindia.com", "daily_cap": 100},
+            {"parser": "parse_tradeindia", "detail_urls": [(2, "u2")],
+             "fetch_kwargs": {"timeout": 90000, "max_detail_pages": 2},
+             "domain": "www.tradeindia.com", "daily_cap": 100},
+        ]
+        handed = []
+
+        def fake_enrich(session, records, targets, timeout, cap_guard, robots_allowed, reveal_js):
+            handed.append(list(targets))
+            return {"attempted": len(targets), "fetched": len(targets), "fetch_failed": 0,
+                    "phone_unavailable": 0, "email_unavailable": 0, "website_unavailable": len(targets)}
+
+        monkeypatch.setattr(spider_mod, "_enrich_from_detail_pages", fake_enrich)
+        anyio.run(s.on_close)
+        assert handed == [[(0, "u0"), (1, "u1")]]  # second entry skipped: run budget (2) exhausted
+        assert s._detail_enrich_stats["attempted"] == 2
+
+    def test_on_close_seed_key_derived_from_site_names(
+            self, small_config, isolated_counter, monkeypatch):
+        """L6 — seeding key goes through SITE_NAMES so a lowercase config name
+        cannot produce a duplicate/divergent fill-rate row."""
+        import anyio
+        from unittest.mock import MagicMock as _MM
+        monkeypatch.setattr("scrapling.fetchers.FetcherSession", _MM)
+        monkeypatch.setattr("scrapling.fetchers.AsyncStealthySession", _MM)
+        s = spider_mod.LeadSpider([{
+            "name": "tradeindia", "enabled": True, "parser": "parse_tradeindia",
+            "pages": 1, "max_requests_per_day": 10,
+            "fetch_kwargs": {"timeout": 90000},
+        }])
+        s.all_records = [RawRecord(
+            company_name="A", source_url="https://www.tradeindia.com/kolkata/x.html")]
+        anyio.run(s.on_close)
+        assert set(s._fill_rates) == {"TradeIndia"}  # one canonical row
+        assert s._fill_rates["TradeIndia"]["total"] == 1
 
     def test_httpx_enrichment_cap_guard_denied_early(self, monkeypatch):
         """T014 — httpx enrichment respects the cap guard."""

@@ -1,4 +1,6 @@
+import logging
 import os
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -24,6 +26,8 @@ from src.scraper.targets import (
     _parse_ti_from_css,
     _enrich_from_detail_pages,
     _extract_detail_urls,
+    _parse_reveal_xhr,
+    _clean_contact_values,
     _jd_page_url,
     _im_page_url,
     _ti_page_url,
@@ -188,6 +192,9 @@ class TestIsDirectoryDomain:
     def test_subdomain_returns_true(self):
         assert _is_directory_domain("listing.justdial.com")
         assert _is_directory_domain("www.facebook.com")
+        assert _is_directory_domain("tiimg.tistatic.com")
+        assert _is_directory_domain("www.getdistributors.com")
+        assert _is_directory_domain("www.w3.org")
 
     def test_non_directory_returns_false(self):
         assert not _is_directory_domain("acme-corp.com")
@@ -230,6 +237,29 @@ class TestExtractWebsites:
         res = _extract_websites_from_text('https://www.justdial.com/xyz https://real.com')
         assert "https://real.com" in res
         assert "https://www.justdial.com/xyz" not in res
+
+    def test_filters_directory_asset_cdn(self):
+        """T007 — a directory CDN asset (TradeIndia logo) is not a company website."""
+        res = _extract_websites_from_text(
+            'https://tiimg.tistatic.com/new_website1/ti-design/images/tiLoginLogo '
+            'https://acme.com'
+        )
+        assert "https://acme.com" in res
+        assert "https://tiimg.tistatic.com" not in res
+
+    def test_ignores_json_ld_script_chrome(self):
+        """T007 — JSON-LD sameAs/chrome URLs (Wikipedia, socials) inside
+        <script> blocks are page metadata about the directory, not a company."""
+        html = (
+            '<script type="application/ld+json">'
+            '{"sameAs":["https://en.wikipedia.org/wiki/TradeIndia",'
+            '"https://www.facebook.com/tradeindia"],'
+            '"url":"https://www.tradeindia.com/about-us/contact-us/"}</script>'
+            '<a href="https://acme.com">acme</a>'
+        )
+        res = _extract_websites_from_text(html)
+        assert "https://acme.com" in res
+        assert not any("wikipedia" in u or "tradeindia" in u or "facebook" in u for u in res)
 
     def test_deduplicates_urls(self):
         res = _extract_websites_from_text('https://acme.com https://acme.com')
@@ -555,6 +585,172 @@ class TestTradeIndiaParsers:
         records = _parse_ti_from_css(resp, "")
         assert records == []
 
+    def _card_with_href(self, href):
+        card = MagicMock()
+        name_el = MagicMock()
+        name_el.text = "Acme"
+        name_el.attrib = {"href": href}
+        h3_list = [MagicMock(), MagicMock(text="Delhi")]
+        card.css.side_effect = lambda sel: {
+            ".company-url": type("sel", (), {"first": name_el})(),
+            "h3": h3_list,
+        }.get(sel, type("sel", (), {"first": None})())
+        return card
+
+    def test_css_parser_captures_resolved_detail_url(self):
+        """T012 — D1: relative anchor href is urljoined against the listing URL."""
+        resp = MagicMock()
+        resp.css.return_value = [self._card_with_href("/acme-com-152913794/")]
+        records = _parse_ti_from_css(
+            resp, source_url="https://www.tradeindia.com/kolkata/software-solutions-city-200579.html")
+        assert len(records) == 1
+        assert records[0].detail_url == "https://www.tradeindia.com/acme-com-152913794/"
+        assert records[0].source_url == "https://www.tradeindia.com/kolkata/software-solutions-city-200579.html"
+
+    def test_css_parser_detail_url_none_when_no_href(self):
+        """T012 — card without a resolvable href gets detail_url=None (no crash)."""
+        name_el = MagicMock()
+        name_el.text = "Acme"
+        name_el.attrib = {}
+        card = MagicMock()
+        card.css.side_effect = lambda sel: {
+            ".company-url": type("sel", (), {"first": name_el})(),
+            "h3": [MagicMock(), MagicMock(text="Delhi")],
+        }.get(sel, type("sel", (), {"first": None})())
+        resp = MagicMock()
+        resp.css.return_value = [card]
+        records = _parse_ti_from_css(resp, "https://www.tradeindia.com/listing.html")
+        assert records[0].detail_url is None
+
+
+class TestExtractDetailUrls:
+    def test_ti_primary_path_captures_urls_across_pages(self):
+        """H1 — base_idx > 0 (pagination page 2+) still captures per-record detail URLs."""
+        records = [
+            RawRecord(company_name="A", detail_url="https://www.tradeindia.com/a/", source_url="l"),
+            RawRecord(company_name="B", detail_url="https://www.tradeindia.com/b/", source_url="l"),
+            RawRecord(company_name="C", detail_url=None, source_url="l"),
+        ]
+        resp = MagicMock()
+        resp.html_content = "<html></html>"
+        out = _extract_detail_urls("parse_tradeindia", resp, records, base_idx=27)
+        assert out == [
+            (27, "https://www.tradeindia.com/a/"),
+            (28, "https://www.tradeindia.com/b/"),
+        ]
+
+    @staticmethod
+    def _card(name, href):
+        card = MagicMock()
+
+        def css(sel):
+            if sel == ".company-url, a[href], h2, h3":
+                name_el = MagicMock()
+                name_el.text = name
+                return type("sel", (), {"first": name_el})()
+            if sel in (".company-url a", ".company-url", "a[href*='tradeindia.com']", "h2 a", "h3 a"):
+                if href:
+                    link_el = MagicMock()
+                    link_el.attrib = {"href": href}
+                    return type("sel", (), {"first": link_el})()
+                return type("sel", (), {"first": None})()
+            return type("sel", (), {"first": None})()
+
+        card.css.side_effect = css
+        return card
+
+    def test_ti_fallback_aligns_named_cards_to_records(self):
+        """M3 — a nameless card is skipped so card k still maps to record k."""
+        cards = [
+            self._card("A", "https://www.tradeindia.com/a/"),
+            self._card(None, "https://www.tradeindia.com/nameless/"),
+            self._card("B", "https://www.tradeindia.com/b/"),
+        ]
+        resp = MagicMock()
+        resp.html_content = "<html></html>"
+        resp.url = "https://www.tradeindia.com/kolkata/software-solutions-city-200579.html"
+        resp.css.return_value = cards
+        records = [
+            RawRecord(company_name="A", detail_url=None, source_url="l"),
+            RawRecord(company_name="B", detail_url=None, source_url="l"),
+        ]
+        out = _extract_detail_urls("parse_tradeindia", resp, records, base_idx=27)
+        assert out == [
+            (27, "https://www.tradeindia.com/a/"),
+            (28, "https://www.tradeindia.com/b/"),
+        ]
+
+    def test_im_path_aligned_after_skipping_nameless_items(self, monkeypatch):
+        """H1/M3 — nameless items are skipped so the item index matches the record index."""
+        state = {"data": [
+            {"CMP": "", "s_url": "https://dir.indiamart.com/nameless.html"},
+            {"CMP": "A", "s_url": "https://dir.indiamart.com/a.html?f=1"},
+            {"CMP": "B", "s_url": "https://dir.indiamart.com/b.html"},
+        ]}
+        monkeypatch.setattr("src.scraper.targets._extract_initial_state", lambda html: state)
+        resp = MagicMock()
+        resp.html_content = "<html></html>"
+        records = [RawRecord(company_name="A"), RawRecord(company_name="B")]
+        out = _extract_detail_urls("parse_indiamart", resp, records, base_idx=27)
+        assert out == [
+            (27, "https://dir.indiamart.com/a.html/"),
+            (28, "https://dir.indiamart.com/b.html/"),
+        ]
+
+
+class TestParseRevealXhr:
+    def test_extracts_phone_and_email(self):
+        """T012 — get-user-mobile XHR is the js-reveal data source."""
+        resp = SimpleNamespace(captured_xhr=[
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"ifpaid":false,"number_mask":false,"default_email":"puja@elab24x7.com","default_mobile":"07971671113"}',
+            ),
+        ])
+        phone, email = _parse_reveal_xhr(resp)
+        assert phone == "07971671113"
+        assert email == "puja@elab24x7.com"
+
+    def test_none_when_no_matching_xhr(self):
+        resp = SimpleNamespace(captured_xhr=[
+            SimpleNamespace(url="https://api.tradeindia.com/home/home-page/user-details", body=b"{}"),
+        ])
+        assert _parse_reveal_xhr(resp) == (None, None)
+
+    def test_merges_fields_across_multiple_xhrs(self):
+        """L5 — a response carrying only phone and another carrying only email
+        are both honored (first non-empty wins per field)."""
+        resp = SimpleNamespace(captured_xhr=[
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"default_mobile":"07971671113","default_email":""}',
+            ),
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=2",
+                body=b'{"default_mobile":"","default_email":"puja@elab24x7.com"}',
+            ),
+        ])
+        assert _parse_reveal_xhr(resp) == ("07971671113", "puja@elab24x7.com")
+
+    def test_rejects_invalid_phone_format(self):
+        """L5 — the revealed phone is validated like every other phone source."""
+        resp = SimpleNamespace(captured_xhr=[
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"default_mobile":"abc","default_email":"puja@elab24x7.com"}',
+            ),
+        ])
+        assert _parse_reveal_xhr(resp) == (None, "puja@elab24x7.com")
+
+
+class TestCleanContactValues:
+    def test_rejects_site_wide_values(self):
+        assert _clean_contact_values("01146710423", "helpdesk@tradeindia.com") == (None, None, None)
+
+    def test_passes_through_genuine_values(self):
+        assert _clean_contact_values("07971671113", "puja@elab24x7.com", "https://elab24x7.com") == (
+            "07971671113", "puja@elab24x7.com", "https://elab24x7.com")
+
 
 class TestEnrichFromDetailPages:
     def test_skips_already_enriched(self):
@@ -592,6 +788,172 @@ class TestEnrichFromDetailPages:
         session = MagicMock()
         _enrich_from_detail_pages(session, [], [], timeout=30000)
         session.fetch.assert_not_called()
+
+    def test_reveal_js_sets_phone_email_not_website(self):
+        """T012 — js-reveal path: phone+email from the XHR; website stays unavailable."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"<html><body>company</body></html>"
+        resp.captured_xhr = [
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"default_email":"puja@elab24x7.com","default_mobile":"07971671113"}',
+            ),
+        ]
+        session.fetch.return_value = resp
+        records = [rec]
+        targets = [(0, "https://www.tradeindia.com/acme-1/")]
+        _enrich_from_detail_pages(session, records, targets, timeout=30000, reveal_js=True)
+        assert records[0].phone == "07971671113"
+        assert records[0].email == "puja@elab24x7.com"
+        assert records[0].website is None
+
+    def test_mailto_email_extracted(self):
+        """T012 — mailto href yields an email on the generic path."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b'<a href="mailto:info@co.com">Email us</a>'
+        session.fetch.return_value = resp
+        records = [rec]
+        _enrich_from_detail_pages(session, records, [(0, "https://detail.com")], timeout=30000)
+        assert records[0].email == "info@co.com"
+
+    def test_enrichment_unavailable_literal_logged(self, caplog):
+        """T012 — every unfilled field logs the grep-able token."""
+        rec = RawRecord(company_name="Acme", phone=None, email=None, website=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"no contact details here"
+        session.fetch.return_value = resp
+        with caplog.at_level(logging.INFO, logger="src.scraper.targets"):
+            _enrich_from_detail_pages(session, [rec], [(0, "https://detail.com")], timeout=30000)
+        assert "enrichment_unavailable: phone" in caplog.text
+        assert "enrichment_unavailable: email" in caplog.text
+        assert "enrichment_unavailable: website" in caplog.text
+        assert 'record="Acme"' in caplog.text
+
+    def test_site_wide_values_rejected(self, caplog):
+        """T012 — helpdesk email / 01146710423 phone never kept as company data."""
+        rec = RawRecord(company_name="Acme", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"<html></html>"
+        resp.captured_xhr = [
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"default_email":"helpdesk@tradeindia.com","default_mobile":"01146710423"}',
+            ),
+        ]
+        session.fetch.return_value = resp
+        records = [rec]
+        with caplog.at_level(logging.INFO, logger="src.scraper.targets"):
+            _enrich_from_detail_pages(session, records, [(0, "https://detail.com")], timeout=30000, reveal_js=True)
+        assert records[0].phone is None
+        assert records[0].email is None
+        assert "enrichment_unavailable: phone" in caplog.text
+        assert "enrichment_unavailable: email" in caplog.text
+
+    def test_does_not_overwrite_populated_fields(self):
+        """T012 — a detail value never overwrites an existing listing field;
+        only genuinely empty fields are filled (partial-field case)."""
+        rec = RawRecord(company_name="C", phone="9876543210", email=None, website=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"Contact: 1111111111, other@co.com, https://other.example"
+        session.fetch.return_value = resp
+        records = [rec]
+        _enrich_from_detail_pages(session, records, [(0, "https://detail.com")], timeout=30000)
+        assert records[0].phone == "9876543210"  # populated phone preserved
+        assert records[0].email == "other@co.com"  # empty email filled
+        assert records[0].website == "https://other.example"  # empty website filled
+
+    def test_site_wide_rejected_at_merge_boundary(self, caplog):
+        """M1 — a polluted value captured at listing time is rejected at the
+        merge boundary too, not just the freshly-extracted detail value."""
+        rec = RawRecord(company_name="Acme", phone="01146710423", email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b"<html>helpdesk@tradeindia.com 01146710423</html>"
+        session.fetch.return_value = resp
+        records = [rec]
+        with caplog.at_level(logging.INFO, logger="src.scraper.targets"):
+            _enrich_from_detail_pages(session, records, [(0, "https://detail.com")], timeout=30000)
+        assert records[0].phone is None  # site-wide phone purged
+        assert records[0].email is None  # site-wide email rejected too
+        assert "enrichment_unavailable: phone" in caplog.text
+        assert "enrichment_unavailable: email" in caplog.text
+
+    def test_robots_denied_not_counted_as_attempted(self, caplog):
+        """L1 — a robots-disallowed URL is not counted in 'attempted'."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        records = [rec]
+        stats = _enrich_from_detail_pages(
+            session, records, [(0, "https://detail.com")], timeout=30000,
+            robots_allowed=lambda url: False,
+        )
+        session.fetch.assert_not_called()
+        assert stats["attempted"] == 0
+        assert stats["fetched"] == 0
+
+    def test_reveal_js_extracts_website_when_present(self):
+        """M2 — the reveal path no longer hardcodes website=None; an external
+        site anchor in the page is captured (unavailable still logged when absent)."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.html_content = b'<html><a href="https://acme.example/about">our site</a></html>'
+        resp.captured_xhr = [
+            SimpleNamespace(
+                url="https://api.tradeindia.com/manufacturers/manufacturers/get-user-mobile?profile_id=1",
+                body=b'{"default_email":"puja@elab24x7.com","default_mobile":"07971671113"}',
+            ),
+        ]
+        session.fetch.return_value = resp
+        records = [rec]
+        _enrich_from_detail_pages(
+            session, records, [(0, "https://www.tradeindia.com/acme-1/")], timeout=30000, reveal_js=True)
+        assert records[0].phone == "07971671113"
+        assert records[0].email == "puja@elab24x7.com"
+        assert records[0].website == "https://acme.example/about"
+
+    def test_robots_gate_skips_disallowed(self):
+        """T012 — robots disallow precedes the fetch (Constitution I)."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        records = [rec]
+        _enrich_from_detail_pages(
+            session, records, [(0, "https://detail.com")], timeout=30000,
+            robots_allowed=lambda url: False,
+        )
+        session.fetch.assert_not_called()
+
+    def test_cap_zero_denies_all_fetches(self):
+        """T012 — cap=0 / over-cap: no request issued for the domain."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        records = [rec]
+        calls = []
+        _enrich_from_detail_pages(
+            session, records, [(0, "https://detail.com/1"), (1, "https://detail.com/2")],
+            timeout=30000,
+            cap_guard=lambda: (calls.append(1), False)[1],
+        )
+        session.fetch.assert_not_called()
+        assert len(calls) == 1
+
+    def test_parse_error_not_conflated_with_unavailable(self, caplog):
+        """T012 — a genuine extraction/fetch exception is NEVER logged as
+        enrichment_unavailable (Constitution V); it is a distinct detail_parse_error."""
+        rec = RawRecord(company_name="C", phone=None, email=None)
+        session = MagicMock()
+        session.fetch.side_effect = RuntimeError("boom: selector gone")
+        with caplog.at_level(logging.ERROR, logger="src.scraper.targets"):
+            _enrich_from_detail_pages(session, [rec], [(0, "https://detail.com")], timeout=30000)
+        assert "detail_parse_error" in caplog.text
+        assert "enrichment_unavailable" not in caplog.text
 
 
 class TestBuildPageUrl:

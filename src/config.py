@@ -74,3 +74,18 @@ def get_icp_cities(config: dict | None = None) -> set[str]:
     if isinstance(cities, list):
         return {c["slug"] if isinstance(c, dict) else str(c) for c in cities}
     return set()
+
+
+def get_fuzzy_match_threshold(config: dict | None = None) -> int:
+    """Return the fuzzy-match threshold from config, defaulting to 90.
+
+    Reads the top-level `fuzzy_match_threshold` key from the config file.
+    Returns 90 when the key is absent or not an integer.
+    """
+    if config is None:
+        config = load_full_config()
+    val = config.get("fuzzy_match_threshold", 90)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 90

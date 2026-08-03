@@ -160,3 +160,4 @@ url_templates:
 
 icp_categories: []
 icp_cities: []
+fuzzy_match_threshold: 90

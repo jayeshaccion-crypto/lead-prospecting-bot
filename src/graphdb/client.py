@@ -25,14 +25,16 @@ SITE_SOURCES = {
 def normalize_company_name(name: str) -> str:
     """Normalize a company name for entity resolution.
 
-    Lowercase, strip legal suffixes (Pvt, Ltd, LLP, Private Limited, etc.),
-    strip punctuation, collapse whitespace.
+    Lowercase, strip punctuation, remove legal/corporate suffixes (Pvt, Ltd,
+    LLP, Private Limited, OPC, Inc, LLC, etc.), collapse whitespace.
+    Punctuation is stripped before suffix removal so 'Pvt. Ltd.', '(OPC)',
+    and 'Private Limited' all normalize correctly.
     """
     n = name.lower().strip()
     n = re.sub(r"[^\w\s]", " ", n)
     n = re.sub(
-        r"\b(pvt|ltd|llp|private\s*limited|inc|corp|corporation|llc|limited|co|company|technologies|solutions|services|systems|group|industries|enterprises?)\b",
-        "", n, flags=re.IGNORECASE,
+        r"\b(pvt|ltd|llp|private\s*limited|opc|inc|corp|corporation|llc|limited|co|company|technologies|solutions|services|systems|group|industries|enterprises?)\b",
+        " ", n, flags=re.IGNORECASE,
     )
     n = re.sub(r"\s+", " ", n).strip()
     return n
@@ -66,33 +68,162 @@ def _source_name(url: str | None) -> str:
     return "Unknown"
 
 
-def _write_fuzzy_review(incoming_name: str, matched_name: str, score: int, threshold: int = 90):
-    """Append a fuzzy-match entry to debug_output/fuzzy_matches.log."""
-    log_dir = "debug_output"
-    try:
-        os.makedirs(log_dir, exist_ok=True)
-        with open(os.path.join(log_dir, "fuzzy_matches.log"), "a", encoding="utf-8") as f:
-            ts = datetime.now(timezone.utc).isoformat()
-            f.write(f"[{ts}] FUZZY_MATCH score={score} threshold={threshold} \"{incoming_name}\" -> \"{matched_name}\"\n")
-    except OSError:
-        logger.warning("Could not write fuzzy-match review log (falling back to console-only)")
-
-
 def ensure_schema(driver: GraphDatabase.driver):
     create_schema(driver)
 
 
-def upsert_company(driver: GraphDatabase.driver, record: dict) -> dict:
+def _write_fuzzy_review(
+    incoming: str,
+    incoming_norm: str,
+    candidate: str,
+    candidate_norm: str,
+    score: float,
+    threshold: int,
+    verdict: str,
+):
+    """Append a fuzzy-comparison line to debug_output/fuzzy_matches.log.
+
+    Every fuzzy comparison is logged (matched or not). Format:
+    timestamp|action|incoming_name|incoming_normalized|candidate_name|
+    candidate_normalized|score|threshold|verdict
+    """
+    log_dir = "debug_output"
+    path = os.path.join(log_dir, "fuzzy_matches.log")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        is_new = not os.path.exists(path)
+        ts = datetime.now(timezone.utc).isoformat()
+        line = "|".join([
+            ts, "FUZZY_MATCH",
+            (incoming or "").replace("|", " "),
+            (incoming_norm or "").replace("|", " "),
+            (candidate or "").replace("|", " "),
+            (candidate_norm or "").replace("|", " "),
+            f"{float(score):.1f}",
+            str(int(threshold)),
+            verdict,
+        ])
+        with open(path, "a", encoding="utf-8") as f:
+            if is_new:
+                f.write(
+                    "timestamp|action|incoming_name|incoming_normalized|"
+                    "candidate_name|candidate_normalized|score|threshold|verdict\n"
+                )
+            f.write(line + "\n")
+    except OSError:
+        logger.warning("Could not write fuzzy-match review log (falling back to console-only)")
+
+
+Q1_PHONE_MATCH = (
+    "MATCH (c:Company) WHERE c.dedup_key = $phone_dk "
+    "RETURN c.dedup_key AS dk, c.company_name AS name"
+)
+Q2_FUZZY_SCAN = (
+    "MATCH (c:Company) WHERE c.normalized_name STARTS WITH $prefix "
+    "RETURN c.dedup_key AS dk, c.company_name AS name, c.normalized_name AS norm"
+)
+Q3_MERGE_COMPANY = """
+MERGE (c:Company {dedup_key: $dk})
+ON CREATE SET
+  c.company_name = $name,
+  c.normalized_name = $norm,
+  c.phone = $phone,
+  c.email = $email,
+  c.website = $website,
+  c.address = $address,
+  c.industry_code = $industry_code,
+  c.first_seen = $now,
+  c.last_seen = $now,
+  c.lead_score = $score,
+  c.lead_score_breakdown = $breakdown,
+  c.sources = $sources
+ON MATCH SET
+  c.company_name = $name,
+  c.normalized_name = $norm,
+  c.phone = CASE WHEN $phone IS NOT NULL AND $phone <> '' THEN $phone ELSE c.phone END,
+  c.email = CASE WHEN $email IS NOT NULL AND $email <> '' THEN $email ELSE c.email END,
+  c.website = CASE WHEN $website IS NOT NULL AND $website <> '' THEN $website ELSE c.website END,
+  c.address = CASE WHEN $address IS NOT NULL AND $address <> '' THEN $address ELSE c.address END,
+  c.industry_code = CASE WHEN $industry_code IS NOT NULL AND $industry_code <> '' THEN $industry_code ELSE c.industry_code END,
+  c.last_seen = $now,
+  c.lead_score = $score,
+  c.lead_score_breakdown = $breakdown,
+  c.sources = CASE
+    WHEN $src_name IS NOT NULL AND NOT $src_name IN COALESCE(c.sources, [])
+    THEN COALESCE(c.sources, []) + [$src_name]
+    ELSE c.sources
+  END
+"""
+Q4_LISTED_IN = (
+    "MATCH (c:Company {dedup_key: $dk}) "
+    "MERGE (cat:Category {name: $category}) "
+    "MERGE (c)-[:LISTED_IN]->(cat)"
+)
+Q5_LOCATED_IN = (
+    "MATCH (c:Company {dedup_key: $dk}) "
+    "MERGE (city:City {name: $city}) "
+    "MERGE (c)-[:LOCATED_IN]->(city)"
+)
+Q6_SOURCED_FROM = (
+    "MATCH (c:Company {dedup_key: $dk}) "
+    "MERGE (s:Source {name: $source}) "
+    "MERGE (c)-[r:SOURCED_FROM]->(s) "
+    "SET r.scraped_at = $now, r.raw_record_id = $raw_record_id"
+)
+
+
+def _resolve(session, record: dict, norm: str, threshold: int) -> dict:
+    """Run entity resolution for one record.
+
+    Returns a dict: dk (the identity key to write under), match_type
+    ('phone'|'fuzzy'|None), matched_name (optional), fuzzy_score (optional).
+    """
+    phone = (record.get("phone") or "").strip() or None
+
+    # 1. Deterministic phone match (primary key)
+    if phone:
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) >= 10:
+            row = session.run(Q1_PHONE_MATCH, {"phone_dk": _dedup_key(record["company_name"], phone)}).single()
+            if row:
+                return {"dk": row["dk"], "match_type": "phone", "matched_name": row["name"]}
+
+    # 2. Fuzzy name pass (only when no phone match)
+    prefix = norm[:3] if len(norm) >= 3 else norm
+    best = None  # (score, candidate_name, dk)
+    for row in session.run(Q2_FUZZY_SCAN, {"prefix": prefix}):
+        cand_norm = row["norm"] or normalize_company_name(row["name"] or "")
+        score = float(fuzz.token_sort_ratio(norm, cand_norm))
+        verdict = "matched" if score >= float(threshold) else "not_matched"
+        _write_fuzzy_review(
+            incoming=record["company_name"], incoming_norm=norm,
+            candidate=row["name"] or "", candidate_norm=cand_norm,
+            score=score, threshold=threshold, verdict=verdict,
+        )
+        if score >= float(threshold):
+            if best is None or score > best[0] or (score == best[0] and (row["name"] or "") < best[1]):
+                best = (score, row["name"] or "", row["dk"])
+    if best:
+        logger.info(
+            "Entity resolution: fuzzy match '%s' -> '%s' (score=%.1f)",
+            record["company_name"], best[1], best[0],
+        )
+        return {"dk": best[2], "match_type": "fuzzy", "matched_name": best[1], "fuzzy_score": best[0]}
+    return {"dk": _dedup_key(record["company_name"], phone, record.get("website")), "match_type": None}
+
+
+def upsert_company(driver: GraphDatabase.driver, record: dict, threshold: int = 90) -> dict:
     """MERGE a Company node with entity resolution, return the operation result.
 
     Entity resolution:
-    1. Deterministic first pass: match on phone number (strongest signal).
-    2. If no phone match, try normalized name fuzzy match (rapidfuzz >= 90).
-    3. On match: UPDATE existing node (merge sources, update last_seen, re-score).
-    4. On no match: CREATE new node.
+    1. Deterministic phone match (last 10 digits) — phone is the primary key.
+    2. If no phone match, fuzzy name match on token_sort_ratio >= threshold;
+       every comparison is written to the review log.
+    3. On match: MERGE the existing node (sources appended, last_seen updated).
+    4. On no match: MERGE creates a new node with first_seen set once.
 
     Returns dict with keys: action (created/merged/skipped), dedup_key,
-    match_type (phone/fuzzy/none), matched_name (if fuzzy), fuzzy_score (if fuzzy).
+    match_type (phone/fuzzy/none), matched_name (if any), fuzzy_score (if any).
     """
     company_name = (record.get("company_name") or "").strip() or "Unknown"
     phone = (record.get("phone") or "").strip() or None
@@ -108,148 +239,65 @@ def upsert_company(driver: GraphDatabase.driver, record: dict) -> dict:
     normalized_name = normalize_company_name(company_name)
     src_name = _source_name(source_url)
     now_str = datetime.now(timezone.utc).isoformat()
-
-    dk = _dedup_key(company_name, phone, website)
-
-    result = {"dedup_key": dk, "action": "skipped", "match_type": None}
+    raw_record_id = record.get("raw_record_id")
 
     with driver.session() as session:
-        # Step 1: Deterministic phone match
-        matched_key = None
-        match_type = None
-        fuzzy_score = None
-        matched_name = None
+        resolved = _resolve(session, record, normalized_name, threshold)
+        dk = resolved["dk"]
+        match_type = resolved["match_type"]
 
-        if phone:
-            digits = re.sub(r"\D", "", phone)
-            if len(digits) >= 10:
-                phone_dk = _dedup_key(company_name, phone)
-                row = session.run(
-                    "MATCH (c:Company {dedup_key: $dk}) RETURN c.dedup_key AS dk, c.company_name AS name",
-                    {"dk": phone_dk},
-                ).single()
-                if row:
-                    matched_key = row["dk"]
-                    match_type = "phone"
-                    logger.info("Entity resolution: phone match for '%s' -> existing '%s' (phone=%s)", company_name, row["name"], digits[-10:])
+        sources = [src_name] if src_name != "Unknown" else []
+        session.run(
+            Q3_MERGE_COMPANY,
+            {"dk": dk, "name": company_name, "norm": normalized_name,
+             "phone": phone, "email": email, "website": website,
+             "address": address, "industry_code": industry_code,
+             "now": now_str, "sources": sources, "src_name": src_name,
+             "score": lead_score,
+             "breakdown": json.dumps(lead_score_breakdown) if lead_score_breakdown else None},
+        )
 
-        # Step 2: Fuzzy name match (only if no phone match)
-        if not matched_key:
-            prefix = normalized_name[:3] if len(normalized_name) >= 3 else normalized_name
-            existing = list(session.run(
-                "MATCH (c:Company) WHERE c.normalized_name STARTS WITH $prefix "
-                "RETURN c.dedup_key AS dk, c.company_name AS name, c.normalized_name AS norm",
-                {"prefix": prefix},
-            ))
-            for row in existing:
-                existing_norm = row.get("norm") or normalize_company_name(row.get("name") or "")
-                score = fuzz.token_sort_ratio(normalized_name, existing_norm)
-                if score >= 90:
-                    matched_key = row["dk"]
-                    match_type = "fuzzy"
-                    fuzzy_score = score
-                    matched_name = row.get("name") or ""
-                    logger.info(
-                        "Entity resolution: fuzzy match '%s' -> '%s' (score=%d)",
-                        company_name, matched_name, score,
-                    )
-                    _write_fuzzy_review(company_name, matched_name, score)
-                    break
-                else:
-                    logger.debug(
-                        "Entity resolution: sub-threshold candidate '%s' (score=%d < 90)",
-                        row.get("name") or "", score,
-                    )
-
-        if matched_key:
-            # MERGE existing — update fields and add relationships
-            dk = matched_key
-            session.run(
-                """MERGE (c:Company {dedup_key: $dk})
-                   SET c.company_name = CASE WHEN $name <> '' THEN $name ELSE c.company_name END,
-                       c.normalized_name = $norm,
-                       c.website = CASE WHEN $website IS NOT NULL AND $website <> '' THEN $website ELSE c.website END,
-                       c.phone = CASE WHEN $phone IS NOT NULL AND $phone <> '' THEN $phone ELSE c.phone END,
-                       c.email = CASE WHEN $email IS NOT NULL AND $email <> '' THEN $email ELSE c.email END,
-                       c.address = CASE WHEN $address IS NOT NULL AND $address <> '' THEN $address ELSE c.address END,
-                       c.industry_code = CASE WHEN $industry IS NOT NULL AND $industry <> '' THEN $industry ELSE c.industry_code END,
-                       c.last_seen = $now,
-                       c.lead_score = $score,
-                       c.lead_score_breakdown = $breakdown,
-                       c.sources = CASE
-                           WHEN $src_name IS NOT NULL AND NOT $src_name IN COALESCE(c.sources, [])
-                           THEN COALESCE(c.sources, []) + [$src_name]
-                           ELSE c.sources
-                       END
-                """,
-                {"dk": dk, "name": company_name, "norm": normalized_name,
-                 "website": website, "phone": phone, "email": email,
-                 "address": address, "industry": industry_code,
-                 "now": now_str, "score": lead_score,
-                 "breakdown": json.dumps(lead_score_breakdown) if lead_score_breakdown else None,
-                 "src_name": src_name},
-            )
-            result["action"] = "merged"
-        else:
-            # CREATE new
-            sources = [src_name] if src_name != "Unknown" else []
-            session.run(
-                """CREATE (c:Company {
-                       dedup_key: $dk, company_name: $name, normalized_name: $norm,
-                       website: $website, phone: $phone, email: $email,
-                       address: $address, industry_code: $industry,
-                       first_seen: $now, last_seen: $now,
-                       lead_score: $score, lead_score_breakdown: $breakdown,
-                       sources: $sources
-                   })""",
-                {"dk": dk, "name": company_name, "norm": normalized_name,
-                 "website": website, "phone": phone, "email": email,
-                 "address": address, "industry": industry_code,
-                 "now": now_str, "score": lead_score,
-                 "breakdown": json.dumps(lead_score_breakdown) if lead_score_breakdown else None,
-                 "sources": sources},
-            )
-            result["action"] = "created"
-
-        # Category relationship (MERGE to avoid duplicates)
         if category_slug:
-            session.run(
-                "MERGE (cat:Category {name: $slug}) "
-                "WITH cat MATCH (c:Company {dedup_key: $dk}) "
-                "MERGE (c)-[:LISTED_IN]->(cat)",
-                {"slug": category_slug, "dk": dk},
-            )
-
-        # City relationship
+            session.run(Q4_LISTED_IN, {"dk": dk, "category": category_slug})
         if city_slug:
-            session.run(
-                "MERGE (city:City {name: $slug}) "
-                "WITH city MATCH (c:Company {dedup_key: $dk}) "
-                "MERGE (c)-[:LOCATED_IN]->(city)",
-                {"slug": city_slug, "dk": dk},
-            )
-
-        # Source relationship
+            session.run(Q5_LOCATED_IN, {"dk": dk, "city": city_slug})
         if src_name != "Unknown":
             session.run(
-                "MERGE (s:Source {name: $src_name}) "
-                "WITH s MATCH (c:Company {dedup_key: $dk}) "
-                "MERGE (c)-[:SOURCED_FROM {scraped_at: $now}]->(s)",
-                {"src_name": src_name, "dk": dk, "now": now_str},
+                Q6_SOURCED_FROM,
+                {"dk": dk, "source": src_name, "now": now_str,
+                 "raw_record_id": raw_record_id or f"{src_name}|{company_name}|{_primary_contact(phone, email, website)}".lower()},
             )
 
-    result["match_type"] = match_type
+    result = {"dedup_key": dk, "action": "merged" if match_type else "created", "match_type": match_type}
+    if resolved.get("matched_name"):
+        result["matched_name"] = resolved["matched_name"]
+    if resolved.get("fuzzy_score") is not None:
+        result["fuzzy_score"] = resolved["fuzzy_score"]
     return result
 
 
-def write_companies(driver: GraphDatabase.driver, records: list[dict]) -> dict:
+def _primary_contact(phone: str | None, email: str | None, website: str | None) -> str:
+    """Return the primary contact for raw_record_id (phone > email > website)."""
+    if phone:
+        digits = re.sub(r"\D", "", phone)
+        if digits:
+            return digits
+    if email:
+        return " ".join(email.split())
+    if website:
+        return " ".join(website.split())
+    return ""
+
+
+def write_companies(driver: GraphDatabase.driver, records: list[dict], threshold: int = 90) -> dict:
     """Write multiple records to Neo4j with entity resolution.
 
-    Returns aggregate stats: created, merged (phone vs fuzzy), total.
+    Returns aggregate stats: created, merged (phone vs fuzzy), skipped, and
+    total graph size (node + relationship counts).
     """
     stats = {"created": 0, "merged_phone": 0, "merged_fuzzy": 0, "skipped": 0}
     for rec in records:
-        r = upsert_company(driver, rec)
+        r = upsert_company(driver, rec, threshold=threshold)
         if r["action"] == "created":
             stats["created"] += 1
         elif r["action"] == "merged":
@@ -261,6 +309,7 @@ def write_companies(driver: GraphDatabase.driver, records: list[dict]) -> dict:
                 stats["merged_phone"] += 1
         else:
             stats["skipped"] += 1
+    stats["graph"] = get_stats(driver)
     return stats
 
 

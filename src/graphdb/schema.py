@@ -28,17 +28,14 @@ REL_TYPES = {
 
 CONSTRAINTS = [
     "CREATE CONSTRAINT company_dedup_key IF NOT EXISTS FOR (c:Company) REQUIRE c.dedup_key IS UNIQUE",
-    "CREATE CONSTRAINT phone_number IF NOT EXISTS FOR (p:Phone) REQUIRE p.number IS UNIQUE",
-    "CREATE CONSTRAINT email_address IF NOT EXISTS FOR (e:Email) REQUIRE e.address IS UNIQUE",
-    "CREATE CONSTRAINT website_url IF NOT EXISTS FOR (w:Website) REQUIRE w.url IS UNIQUE",
-    "CREATE CONSTRAINT location_key IF NOT EXISTS FOR (l:Location) REQUIRE l.city IS UNIQUE",
-    "CREATE CONSTRAINT industry_code IF NOT EXISTS FOR (i:Industry) REQUIRE i.code IS UNIQUE",
     "CREATE CONSTRAINT source_name IF NOT EXISTS FOR (s:Source) REQUIRE s.name IS UNIQUE",
+    "CREATE CONSTRAINT category_name IF NOT EXISTS FOR (cat:Category) REQUIRE cat.name IS UNIQUE",
+    "CREATE CONSTRAINT city_name IF NOT EXISTS FOR (city:City) REQUIRE city.name IS UNIQUE",
 ]
 
 INDEXES = [
+    "CREATE INDEX company_normalized_name IF NOT EXISTS FOR (c:Company) ON (c.normalized_name)",
     "CREATE INDEX company_name_index IF NOT EXISTS FOR (c:Company) ON (c.company_name)",
-    "CREATE INDEX company_website_index IF NOT EXISTS FOR (c:Company) ON (c.website)",
 ]
 
 

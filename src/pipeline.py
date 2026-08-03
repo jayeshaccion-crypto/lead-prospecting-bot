@@ -342,12 +342,16 @@ def raw_record_to_lead(record) -> "LeadRecord":
 def _write_to_neo4j(records: list[LeadRecord]) -> dict:
     """Write valid records to Neo4j with entity resolution. Returns stats."""
     try:
-        from src.graphdb.client import ensure_schema, write_companies
+        from src.graphdb.client import ensure_schema, write_companies, _source_name
         from src.graphdb import get_driver, close_driver
+        from src.config import get_fuzzy_match_threshold
+        threshold = get_fuzzy_match_threshold()
         driver = get_driver()
         ensure_schema(driver)
         row_dicts = []
         for r in records:
+            src_name = _source_name(r.source_url)
+            primary_contact = r.phone or r.email or r.website or ""
             row_dicts.append({
                 "company_name": r.company_name,
                 "website": r.website,
@@ -356,12 +360,14 @@ def _write_to_neo4j(records: list[LeadRecord]) -> dict:
                 "address": r.address,
                 "industry_code": r.industry_code,
                 "source_url": r.source_url,
+                "source_name": src_name,
+                "raw_record_id": f"{src_name}|{r.company_name}|{primary_contact}".lower(),
                 "city_slug": r.city_slug,
                 "category_slug": r.category_slug,
                 "lead_score": r.lead_score,
                 "lead_score_breakdown": r.lead_score_breakdown,
             })
-        stats = write_companies(driver, row_dicts)
+        stats = write_companies(driver, row_dicts, threshold=threshold)
         close_driver()
         return stats
     except ImportError as exc:
@@ -447,6 +453,11 @@ def main_pipeline(dry_run: bool = False) -> dict:
                 neo4j_stats["merged_phone"] + neo4j_stats["merged_fuzzy"],
                 neo4j_stats["merged_phone"],
                 neo4j_stats["merged_fuzzy"],
+            )
+            graph = neo4j_stats.get("graph", {})
+            logger.info(
+                "Neo4j graph size: %s",
+                {k: v for k, v in graph.items()},
             )
         except Exception as exc:
             logger.error("Neo4j write failed entirely: %s", exc)

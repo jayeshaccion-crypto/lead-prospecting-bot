@@ -286,3 +286,25 @@ class TestStarterFileContract:
         combos = expand_start_urls(cfg["categories"], cfg["cities"], cfg["url_templates"])
         assert len([c for c in combos if c.site == "indiamart"]) == 100
         assert len([c for c in combos if c.site == "tradeindia"]) == 100
+
+
+class TestFuzzyMatchThreshold:
+    """FR-005 — fuzzy_match_threshold config, default 90 (Clarification Session 2026-08-03)."""
+
+    def test_default_is_90_when_absent(self):
+        from src.config import get_fuzzy_match_threshold
+        assert get_fuzzy_match_threshold({}) == 90
+
+    def test_reads_int_when_present(self):
+        from src.config import get_fuzzy_match_threshold
+        assert get_fuzzy_match_threshold({"fuzzy_match_threshold": 85}) == 85
+
+    def test_falls_back_to_90_on_non_numeric(self):
+        from src.config import get_fuzzy_match_threshold
+        assert get_fuzzy_match_threshold({"fuzzy_match_threshold": "high"}) == 90
+        assert get_fuzzy_match_threshold({"fuzzy_match_threshold": None}) == 90
+
+    def test_starter_config_sets_90(self):
+        from src.config import load_full_config
+        cfg = load_full_config()
+        assert cfg.get("fuzzy_match_threshold", 90) == 90

@@ -7,26 +7,27 @@ from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-DEFAULT_USER = os.environ.get("NEO4J_USER", "neo4j")
-DEFAULT_PASSWORD = os.environ.get("NEO4J_PASSWORD")
-
 _driver_instance = None
 
 
 def get_driver() -> GraphDatabase.driver:
     global _driver_instance
     if _driver_instance is None:
-        if not DEFAULT_PASSWORD:
+        # Read credentials at call time (L4) so NEO4J_PASSWORD can be set
+        # after this module is imported.
+        uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+        user = os.environ.get("NEO4J_USER", "neo4j")
+        password = os.environ.get("NEO4J_PASSWORD")
+        if not password:
             raise RuntimeError(
                 "NEO4J_PASSWORD is not set — credentials must come from the environment"
             )
-        _driver_instance = GraphDatabase.driver(DEFAULT_URI, auth=(DEFAULT_USER, DEFAULT_PASSWORD))
+        _driver_instance = GraphDatabase.driver(uri, auth=(user, password))
         try:
             _driver_instance.verify_connectivity()
-            logger.info("Connected to Neo4j at %s", DEFAULT_URI)
+            logger.info("Connected to Neo4j at %s", uri)
         except Exception as exc:
-            logger.warning("Neo4j not available at %s: %s", DEFAULT_URI, exc)
+            logger.warning("Neo4j not available at %s: %s", uri, exc)
             _driver_instance = None
             raise
     return _driver_instance

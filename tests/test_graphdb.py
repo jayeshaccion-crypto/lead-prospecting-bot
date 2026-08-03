@@ -1,8 +1,9 @@
 """Unit tests for src/graphdb.client — no live Neo4j required.
 
-Covers: normalization table (incl. OPC), dedup-key determinism incl.
-cross-site phone keying, fuzzy selection + tie-break with stubbed
-candidates, and the review-log writer format.
+Covers: normalization table (incl. OPC), legal-suffix-only fuzzy normalization (H1),
+dedup-key determinism incl. cross-site phone keying, fuzzy selection + tie-break with
+stubbed candidates, primary-contact (M3), source mapping (M4/M6), review-log writer
+format + pipe escaping (L3), and Q3 display-name ON CREATE semantics (M1).
 """
 
 import json
@@ -14,9 +15,14 @@ from types import SimpleNamespace
 import pytest
 
 from src.graphdb.client import (
+    Q3_MERGE_COMPANY,
     _dedup_key,
+    _escape_pipe,
+    _primary_contact,
     _write_fuzzy_review,
+    fuzzy_normalize_company_name,
     normalize_company_name,
+    source_name,
 )
 
 REAL_NAMES = [
@@ -122,10 +128,11 @@ class TestFuzzyResolution:
     def test_tie_break_lexicographic(self, tmp_path, monkeypatch):
         from src.graphdb.client import _resolve
         monkeypatch.chdir(tmp_path)
-        # Both candidates score 100.0 against incoming "tech"; tie broken by name.
+        # Both candidates fuzzy-normalize to "tech" and score 100.0 against
+        # incoming "Tech"; tie is broken by lexicographically smaller name.
         cands = [
-            {"dk": "dk-z", "name": "Zeta Tech", "norm": "tech"},
-            {"dk": "dk-a", "name": "Alpha Tech", "norm": "tech"},
+            {"dk": "dk-z", "name": "Tech Pvt Ltd", "norm": "tech"},
+            {"dk": "dk-a", "name": "Tech Limited", "norm": "tech"},
         ]
         rec = {"company_name": "Tech"}
         res = _resolve(self._session(cands), rec, "tech", 90)
@@ -145,6 +152,117 @@ class TestFuzzyResolution:
         res = _resolve(Session(), rec, "acme", 90)
         assert res["match_type"] == "phone"
         assert res["dk"] == "dk-phone"
+
+
+class TestFuzzyNormalizeCompanyName:
+    """H1 — fuzzy normalization strips only legal suffixes, never descriptors."""
+
+    def test_keeps_descriptor_words(self):
+        assert fuzzy_normalize_company_name("Pinnacle It Solutions") == "pinnacle it solutions"
+        assert fuzzy_normalize_company_name("Pinnacle It Services") == "pinnacle it services"
+
+    def test_strips_legal_suffixes_only(self):
+        assert fuzzy_normalize_company_name("Codetrex Infotech Pvt. Ltd.") == "codetrex infotech"
+        assert fuzzy_normalize_company_name("Nitai Technologies (OPC) Private Limited") == "nitai technologies"
+
+    def test_descriptor_pairs_score_below_threshold(self):
+        """H1 — 'Solutions' vs 'Services' vs 'Systems' must NOT fuse at 90."""
+        from rapidfuzz import fuzz
+        pairs = [
+            ("Pinnacle It Solutions", "Pinnacle It Services"),
+            ("Tech Solutions India", "Tech Services India"),
+            ("Tech Solutions India", "Tech Systems India"),
+            ("Acme Technologies", "Acme Tech"),
+        ]
+        for a, b in pairs:
+            score = fuzz.token_sort_ratio(
+                fuzzy_normalize_company_name(a),
+                fuzzy_normalize_company_name(b),
+            )
+            assert score < 90, f"{a!r} vs {b!r} scored {score:.1f} — must stay below 90"
+
+    def test_legal_variants_score_100(self):
+        """Legal-suffix variants of the same company must still merge at 100."""
+        from rapidfuzz import fuzz
+        pairs = [
+            ("Codetrex Infotech Pvt. Ltd.", "Codetrex Infotech"),
+            ("Nitai Technologies (OPC) Private Limited", "Nitai Technologies"),
+        ]
+        for a, b in pairs:
+            score = fuzz.token_sort_ratio(
+                fuzzy_normalize_company_name(a),
+                fuzzy_normalize_company_name(b),
+            )
+            assert score == 100.0, f"{a!r} vs {b!r} scored {score:.1f} — expected 100"
+
+    def test_resolve_does_not_merge_descriptor_pairs(self, tmp_path, monkeypatch):
+        """H1 end-to-end — over-normalization no longer fuses distinct companies."""
+        from src.graphdb.client import _resolve
+        monkeypatch.chdir(tmp_path)
+
+        class Session:
+            def run(self, query, params=None):
+                yield {"dk": "dk-sol", "name": "Pinnacle It Solutions", "norm": "pinnacle it solutions"}
+
+        rec = {"company_name": "Pinnacle It Services"}
+        res = _resolve(Session(), rec, "pinnacle it", 90)
+        assert res["match_type"] is None
+        assert res["dk"] != "dk-sol"
+
+
+class TestPrimaryContact:
+    """M3 — raw_record_id primary contact is digits-only for phones."""
+
+    def test_phone_reduced_to_digits(self):
+        assert _primary_contact("+91 7971-671 113", None, None) == "917971671113"
+
+    def test_prefers_phone_over_email_over_website(self):
+        assert _primary_contact("07971 671113", "a@b.com", "http://x.in") == "07971671113"
+        assert _primary_contact(None, "a@b.com", "http://x.in") == "a@b.com"
+        assert _primary_contact(None, None, "http://x.in") == "http://x.in"
+
+    def test_empty_when_nothing(self):
+        assert _primary_contact(None, None, None) == ""
+
+
+class TestSourceName:
+    """M4/M6 — single source mapping; unknown sources resolve to None."""
+
+    def test_known_domains(self):
+        assert source_name("https://www.justdial.com/foo") == "Justdial"
+        assert source_name("https://dir.indiamart.com/foo") == "IndiaMART"
+        assert source_name("http://www.tradeindia.com/foo") == "TradeIndia"
+
+    def test_unknown_returns_none(self):
+        assert source_name("https://example.com") is None
+        assert source_name(None) is None
+
+
+class TestEscapePipe:
+    """L3 — review-log field escaping per contract (\\|)."""
+
+    def test_escapes_pipe(self):
+        assert _escape_pipe("A|B") == "A\\|B"
+        assert _escape_pipe("Plain") == "Plain"
+        assert _escape_pipe(None) == ""
+
+
+class TestMergeQuery:
+    """M1 — display-name fields must only be written ON CREATE."""
+
+    def test_company_name_only_on_create(self):
+        on_create = Q3_MERGE_COMPANY.split("ON MATCH SET")[0]
+        assert "c.company_name = $name" in on_create
+        assert "c.normalized_name = $norm" in on_create
+        on_match = Q3_MERGE_COMPANY.split("ON MATCH SET")[1]
+        assert "c.company_name" not in on_match
+        assert "c.normalized_name" not in on_match
+
+    def test_first_seen_only_on_create(self):
+        on_create = Q3_MERGE_COMPANY.split("ON MATCH SET")[0]
+        assert "c.first_seen = $now" in on_create
+        on_match = Q3_MERGE_COMPANY.split("ON MATCH SET")[1]
+        assert "first_seen" not in on_match
 
 
 class TestReviewLogWriter:

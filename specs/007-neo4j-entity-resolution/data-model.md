@@ -73,22 +73,26 @@ ON CREATE SET
   c.industry_code = $industry_code,
   c.first_seen = $now,
   c.last_seen = $now,
+  c.lead_score = $score,
+  c.lead_score_breakdown = $breakdown,
   c.sources = $sources
 ON MATCH SET
-  c.company_name = $name,
-  c.normalized_name = $norm,
   c.phone = CASE WHEN $phone IS NOT NULL AND $phone <> '' THEN $phone ELSE c.phone END,
   c.email = CASE WHEN $email IS NOT NULL AND $email <> '' THEN $email ELSE c.email END,
   c.website = CASE WHEN $website IS NOT NULL AND $website <> '' THEN $website ELSE c.website END,
   c.address = CASE WHEN $address IS NOT NULL AND $address <> '' THEN $address ELSE c.address END,
   c.industry_code = CASE WHEN $industry_code IS NOT NULL AND $industry_code <> '' THEN $industry_code ELSE c.industry_code END,
   c.last_seen = $now,
+  c.lead_score = $score,
+  c.lead_score_breakdown = $breakdown,
   c.sources = CASE
     WHEN $src_name IS NOT NULL AND NOT $src_name IN COALESCE(c.sources, [])
     THEN COALESCE(c.sources, []) + [$src_name]
     ELSE c.sources
   END
 ```
+
+`company_name`, `normalized_name`, and `first_seen` are set **ON CREATE only** (M1) — a later merge never overwrites the canonical display name or identity.
 
 ### Q4 — LISTED_IN
 
@@ -117,7 +121,10 @@ SET r.scraped_at = $now, r.raw_record_id = $raw_record_id
 
 ## Normalization Sample (evidence)
 
-`normalize_company_name`: lowercase → punctuation→space → strip suffix set `pvt|ltd|llp|private limited|opc|inc|corp|corporation|llc|limited|co|company|technologies|solutions|services|systems|group|industries|enterprises` → collapse whitespace.
+Two normalization functions — see [entity-resolution.md](./contracts/entity-resolution.md) §Normalization:
+
+- `normalize_company_name`: lowercase → punctuation→space → strip suffix set `pvt|ltd|llp|private limited|opc|inc|corp|corporation|llc|limited|co|company|technologies|solutions|services|systems|group|industries|enterprises` → collapse whitespace. Used for stored `normalized_name`, prefix scan, and name-based `_dedup_key`.
+- `fuzzy_normalize_company_name`: lowercase → punctuation→space → strip ONLY legal suffixes `pvt|ltd|llp|private limited|opc|inc|corp|corporation|llc|limited|co|company` → collapse whitespace. Used for fuzzy scoring (H1) — descriptor words are kept so "Solutions"/"Services"/"Systems" variants never fuse.
 
 Verified on 38 real names (IndiaMART 28 + Justdial 10 + TradeIndia 13, deduped to 38 unique):
 

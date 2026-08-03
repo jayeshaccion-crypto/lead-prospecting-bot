@@ -48,6 +48,12 @@ Expected: all pass. Coverage:
 python -m pytest tests/test_graphdb_idempotency.py -q -m integration
 ```
 
+> **Safety gate (H2):** this test and the demo run `MATCH (n) DETACH DELETE n` against whatever database `get_driver()` points to. They refuse to run unless you explicitly opt in:
+>
+> ```powershell
+> $env:NEO4J_RESET_ALLOWED = "1"
+> ```
+
 **Procedure it runs (exact):**
 1. On a dedicated test database: clear graph via `MATCH (n) DETACH DELETE n`.
 2. **Run 1** — `write_companies(driver, BATCH)` with the committed 54-record fixture `tests/fixtures/graphdb_batch.json`.
@@ -70,7 +76,7 @@ MATCH ()-[r:SOURCED_FROM]->() RETURN count(r) AS sourced_from
 
 ### Recorded results — 2026-08-03 (live Neo4j, env-only credentials)
 
-Run with: `python -m scripts.demo_idempotency` after `$env:NEO4J_PASSWORD = "<password>"`. Batch = 54 records (real IndiaMART/Justdial/TradeIndia captures + synthetic cross-site pair).
+Run with: `python -m scripts.demo_idempotency` after `$env:NEO4J_PASSWORD = "<password>"` and `$env:NEO4J_RESET_ALLOWED = "1"`. Batch = 54 records (real IndiaMART/Justdial/TradeIndia captures + synthetic cross-site pair).
 
 | Metric | Run 1 | Run 2 |
 |--------|-------|-------|

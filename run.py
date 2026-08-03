@@ -80,15 +80,17 @@ def main():
 
     # 4. Write to Neo4j graph database
     try:
-        import neo4j
-        from src.graphdb.client import upsert_company
+        from src.graphdb.client import ensure_schema, write_companies
         from src.graphdb import get_driver, close_driver
         driver = get_driver()
-        for row in lead_rows:
-            row_dict = dict(zip(lead_columns(), row))
-            upsert_company(driver, row_dict)
+        ensure_schema(driver)
+        row_dicts = [dict(zip(lead_columns(), row)) for row in lead_rows]
+        stats = write_companies(driver, row_dicts)
         close_driver()
-        logger.info("Written %d records to Neo4j", len(lead_rows))
+        logger.info(
+            "Written %d records to Neo4j (%d created, %d phone-merged, %d fuzzy-merged)",
+            len(lead_rows), stats["created"], stats["merged_phone"], stats["merged_fuzzy"],
+        )
     except Exception as exc:
         logger.warning("Neo4j write skipped (%s)", exc)
 
@@ -97,12 +99,15 @@ def main():
     build_dashboard.build()
     graph_stats = "--"
     try:
-        from src.graphdb import get_driver
+        from src.graphdb import get_driver, close_driver
         d = get_driver()
         from src.graphdb.client import get_stats
         s = get_stats(d)
-        graph_stats = f"{s['Company']}C {s['Phone']}P {s['Email']}E"
-        d.close()
+        graph_stats = (
+            f"{s['Company']}C {s['Category']}Cat {s['City']}City {s['Source']}S "
+            f"| {s['LISTED_IN']}LI {s['LOCATED_IN']}LoI {s['SOURCED_FROM']}SF"
+        )
+        close_driver()
     except Exception:
         pass
     logger.info("Dashboard rebuilt | Neo4j: %s (total %.1fs)", graph_stats, time.perf_counter() - start)

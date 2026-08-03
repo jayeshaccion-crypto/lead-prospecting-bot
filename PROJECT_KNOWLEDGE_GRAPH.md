@@ -11,13 +11,10 @@ ENTITIES:
 - InvalidRecord: NamedTuple for a validation failure. Fields: record (LeadRecord), reason (str). Source: src/validation.py:10
 - TargetSite: A configured business directory. Fields: name, entry_url, parser (registered parser function), pages, fetch_kwargs (timeout, max_detail_pages, page_delay, target_delay). Source: config/targets.yaml
 - DatabaseClient: SQLite client mirroring SheetsClient interface. Manages Leads, staging, scrape_errors, rejected_duplicates. Source: src/database/client.py:18
-- GraphCompany (Neo4j): Graph node representing a company. Fields: dedup_key (unique), company_name, website, address, industry_code, source_url, scraped_at. Source: src/graphdb/client.py:58 — MERGE ON dedup_key
-- GraphPhone (Neo4j): Graph node. Fields: number (unique). Source: src/graphdb/client.py:98
-- GraphEmail (Neo4j): Graph node. Fields: address (unique). Source: src/graphdb/client.py:105
-- GraphWebsite (Neo4j): Graph node. Fields: url (unique). Source: src/graphdb/client.py:112
-- GraphLocation (Neo4j): Graph node. Fields: city (unique). Source: src/graphdb/client.py:119
-- GraphIndustry (Neo4j): Graph node. Fields: code (unique), name. Source: src/graphdb/client.py:126
-- GraphSource (Neo4j): Graph node. Fields: name (unique). Source: src/graphdb/client.py:134
+- GraphCompany (Neo4j): Graph node representing a company. Fields: dedup_key (unique), company_name, normalized_name, phone, email, website, address, industry_code, first_seen, last_seen, sources (list), lead_score, lead_score_breakdown. Source: src/graphdb/client.py (Q3_MERGE_COMPANY, MERGE on dedup_key)
+- GraphCategory (Neo4j): Graph node. Fields: name (unique). Source: src/graphdb/client.py (Q4_LISTED_IN)
+- GraphCity (Neo4j): Graph node. Fields: name (unique). Source: src/graphdb/client.py (Q5_LOCATED_IN)
+- GraphSource (Neo4j): Graph node. Fields: name (unique). Source: src/graphdb/client.py (Q6_SOURCED_FROM)
 
 RELATIONSHIPS (SQLite / Python):
 - TargetSite --[scraped_by (registered parser)]--> Parser (parse_justdial, parse_indiamart, parse_tradeindia)
@@ -30,22 +27,18 @@ RELATIONSHIPS (SQLite / Python):
 - ScrapeError --[written_to]--> DatabaseClient (scrape_errors tab)
 - RejectedDuplicate --[written_to]--> DatabaseClient (rejected_duplicates tab)
 - RawRecord --[inlines_to]--> run.py (standalone path, no staging/promotion)
-- LeadRecord --[graph_written_by (upsert_company)]--> GraphCompany (Neo4j)
+- LeadRecord --[graph_written_by (write_companies / _upsert_company_in_tx)]--> GraphCompany (Neo4j)
 
 RELATIONSHIPS (Neo4j):
-- (GraphCompany)-[:HAS_PHONE]->(GraphPhone)
-- (GraphCompany)-[:HAS_EMAIL]->(GraphEmail)
-- (GraphCompany)-[:HAS_WEBSITE]->(GraphWebsite)
-- (GraphCompany)-[:LOCATED_IN]->(GraphLocation)
-- (GraphCompany)-[:BELONGS_TO]->(GraphIndustry)
-- (GraphCompany)-[:SOURCED_FROM]->(GraphSource)
-- (GraphCompany)-[:SIMILAR_TO {score}]->(GraphCompany) (schema-defined, no population logic yet)
+- (GraphCompany)-[:LISTED_IN]->(GraphCategory)
+- (GraphCompany)-[:LOCATED_IN]->(GraphCity)
+- (GraphCompany)-[:SOURCED_FROM {scraped_at, raw_record_id}]->(GraphSource)
 
 SYSTEM ARCHITECTURE:
 - Modules/Services:
-  - run.py: Standalone pipeline entry (run directly via `python run.py`). Scrapes all targets, converts RawRecords, writes SQLite, writes Neo4j, builds dashboard. No staging/promotion/validation/scoring.
+  - run.py: Standalone pipeline entry (run directly via `python run.py`). Scrapes all targets, converts RawRecords, writes SQLite, writes Neo4j (write_companies + ensure_schema), builds dashboard. No staging/promotion/validation/scoring.
   - src/__main__.py: CLI entry point with --dry-run, --promote, --scheduler flags. Calls src/pipeline.py. Source: src/__main__.py:1
-  - src/pipeline.py: Orchestrates scrape → enrich → dedup → validate → score → write staging → promote. Raises PipelineThresholdError on >30% failure. Source: src/pipeline.py:314
+  - src/pipeline.py: Orchestrates scrape → enrich → dedup → validate → score → write staging → promote → write Neo4j (`_write_to_neo4j`). Raises PipelineThresholdError on >30% failure. Source: src/pipeline.py:314
   - src/scraper/engine.py: Iterates targets, checks robots.txt (fail-open), delegates to scrape_target(), aggregates results. Source: src/scraper/engine.py:14
   - src/scraper/targets.py: Site-specific parsers — Justdial (__NEXT_DATA__ + XHR + CSS), IndiaMART (__INITIAL_STATE__ + CSS + httpx phone enrichment), TradeIndia (CSS, contact info JS-only). RawRecord dataclass, detail page enrichment (browser disabled via max_detail_pages:0), pagination helpers, retry loop (3 attempts, 429→30s/60s waits, empty→5s, exception→10s). Source: src/scraper/targets.py:1
   - src/scraper/utils.py: Utilities — robots.txt caching (fail-open), domain normalization, email validation (RFC 5322-lite), retry decorator (exponential backoff). Source: src/scraper/utils.py
@@ -56,23 +49,23 @@ SYSTEM ARCHITECTURE:
   - src/scheduler.py: APScheduler loop — Monday 06:00 UTC or custom interval. Source: src/scheduler.py:22
   - src/database/client.py: SQLite DatabaseClient with CRUD + dedup_key collision prevention. Source: src/database/client.py:18
   - src/database/tabs.py: Tab definitions + ensure_all_tabs + write_staging. Source: src/database/tabs.py:1
-  - src/graphdb/__init__.py: Neo4j driver singleton (get_driver()), configured via NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD env vars. Source: src/graphdb/__init__.py:1
-  - src/graphdb/schema.py: Neo4j constraints (7 unique property constraints) and indexes (2). Source: src/graphdb/schema.py:1
-  - src/graphdb/client.py: High-level Cypher queries — upsert_company(), query_by_location(), query_company_detail(), get_company_count(), get_stats(). Source: src/graphdb/client.py:1
+  - src/graphdb/__init__.py: Neo4j driver singleton (get_driver()), configured via NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD env vars read at call time. Raises RuntimeError if NEO4J_PASSWORD unset. Source: src/graphdb/__init__.py:1
+  - src/graphdb/schema.py: Neo4j constraints (4 unique property constraints) and indexes (2). Source: src/graphdb/schema.py:1
+  - src/graphdb/client.py: High-level Cypher queries — write_companies()/upsert_company() (entity resolution), query_by_location(), query_company_detail(), get_company_count(), get_stats(). Source: src/graphdb/client.py:1
   - src/graphdb/migrate.py: Bulk SQLite → Neo4j migration with dedup_key merge strategy. Source: src/graphdb/migrate.py:1
   - build_dashboard.py: Generates HTML dashboard from SQLite Leads table. Source: build_dashboard.py
   - scripts/migrate_neo4j.py: CLI entry point for SQLite → Neo4j migration. Source: scripts/migrate_neo4j.py
-- Data flow (run.py — standalone): run.py → scrape_all_targets() → raw_record_to_lead (inline dedup_key) → SQLite INSERT → Neo4j upsert_company() → build_dashboard()
-- Data flow (pipeline.py — scheduler/CLI): __main__.py → main_pipeline() → scrape_all_targets() → raw_record_to_lead() → deduplicate_records() → filter_valid_records() → score_all_records() → write_staging() → [!dry_run] check_failure_threshold() → promote_to_production(). NOTE: This path does NOT currently write to Neo4j.
+- Data flow (run.py — standalone): run.py → scrape_all_targets() → raw_record_to_lead (inline dedup_key) → SQLite INSERT → Neo4j write_companies() (ensure_schema) → build_dashboard()
+- Data flow (pipeline.py — scheduler/CLI): __main__.py → main_pipeline() → scrape_all_targets() → raw_record_to_lead() → deduplicate_records() → filter_valid_records() → score_all_records() → write_staging() → [!dry_run] check_failure_threshold() → promote_to_production() → write Neo4j (_write_to_neo4j).
 - External dependencies/APIs:
   - Scrapling (>=0.4): StealthySession headless browser with Cloudflare solving, capture_xhr, network_idle
   - httpx (stdlib-compatible): Plain-HTTP enrichment for IndiaMART phone extraction (detail pages)
-  - neo4j (6.2.0+): Python driver for Neo4j graph database
+  - neo4j (5.20.0): Python driver for Neo4j graph database (installed 5.20.0)
   - SQLite: Local storage (data/leads.db), Cloudflare D1 compatible dialect
   - APScheduler (>=3.10): Scheduling (src/scheduler.py / __main__.py path only)
 - Storage:
   - SQLite with 4 tables (Leads, staging, scrape_errors, rejected_duplicates), 12-column fixed schema
-  - Neo4j with 7 node labels (Company, Phone, Email, Website, Location, Industry, Source), 6 relationship types, 7 constraints, 2 indexes
+  - Neo4j with 4 node labels (Company, Category, City, Source), 3 relationship types (LISTED_IN, LOCATED_IN, SOURCED_FROM), 4 constraints, 2 indexes
 
 CONTRACTS/SPECS:
 - LeadRecord schema: 12 fields, Pydantic model. company_name required non-empty, website/source_url validated as URLs, lead_score validated 0-100. Source: src/models.py:18, specs/001-lead-prospecting-pipeline/data-model.md
@@ -89,10 +82,10 @@ CONTRACTS/SPECS:
 - Promotion: promote_to_production() reads staging, checks failure threshold, copies to Leads with dedup_key collision check. Source: src/pipeline.py:201
 - Scheduling: APScheduler cron "mon 06:00 UTC" or custom interval. Source: src/scheduler.py:22
 - CLI interface: --dry-run (staging only), --promote (manual promotion), --scheduler (start scheduler loop), --interval-days (default 7). --dry-run and --promote mutually exclusive. Source: src/__main__.py:5
-- Neo4j driver: get_driver() returns bolt://localhost:7687 default, auth neo4j/leadsbot. Configured via NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD env vars. Source: src/graphdb/__init__.py:17
-- Neo4j upsert_company(): MERGE ON dedup_key. Creates Company node + relationships to Phone, Email, Website, Location, Industry, Source. Rejects known site-wide values (KNOWN_SITE_WIDE_PHONES, KNOWN_SITE_WIDE_EMAILS, DIRECTORY_DOMAINS for websites). Source: src/graphdb/client.py:58
-- Neo4j schema: 7 unique constraints (Company.dedup_key, Phone.number, Email.address, Website.url, Location.city, Industry.code, Source.name). 2 indexes (Company.company_name, Company.website). Source: src/graphdb/schema.py:10
-- Neo4j queries: query_by_location(city), query_company_detail(company_name partial match), get_stats() with per-label counts. Source: src/graphdb/client.py:143
+- Neo4j driver: get_driver() returns bolt://localhost:7687 default (NEO4J_URI), user NEO4J_USER default neo4j, password NEO4J_PASSWORD (no default — RuntimeError if unset). Credentials read at call time, not import time. Source: src/graphdb/__init__.py:17
+- Neo4j upsert: write_companies() runs entity resolution per record (phone last-10-digits primary key, else fuzzy token_sort_ratio >= 90 on legal-suffix-only normalization) and MERGEs Company nodes (dedup_key) + Category/City/Source nodes and LISTED_IN/LOCATED_IN/SOURCED_FROM edges. company_name/normalized_name/first_seen set only ON CREATE; last_seen/lead_score updated on match; sources appended if absent. Every fuzzy comparison written to debug_output/fuzzy_matches.log. All writes in one transaction per record. Source: src/graphdb/client.py
+- Neo4j schema: 4 unique constraints (Company.dedup_key, Category.name, City.name, Source.name). 2 indexes (Company.company_name, Company.normalized_name). Source: src/graphdb/schema.py:10
+- Neo4j queries: query_by_location(city), query_company_detail(company_name partial match), get_stats() with per-label counts (Company/Category/City/Source + relationship counts). Source: src/graphdb/client.py
 - Dashboard build: build_dashboard.py reads SQLite db, generates HTML. Source: build_dashboard.py:1
 
 BUSINESS RULES / CONSTRAINTS:
@@ -116,9 +109,10 @@ BUSINESS RULES / CONSTRAINTS:
 - BR-018: Directory/social domains MUST NOT be assigned as company website — DIRECTORY_DOMAINS filters facebook.com, twitter.com, linkedin.com, youtube.com, justdial.com, indiamart.com, tradeindia.com, google.com, whatsapp.com, googletagmanager.com, schema.org. Source: src/scraper/targets.py:34
 - BR-019: Browser detail page enrichment is disabled (max_detail_pages=0) — body retrieval always fails with Protocol error in this network environment. IndiaMART uses httpx fallback instead. Source: config/targets.yaml
 - BR-020: Neo4j write is non-fatal — failure logs warning but pipeline continues. Source: run.py:92
-- BR-021: Neo4j upsert is idempotent — MERGE on dedup_key, SET overwrites properties. Source: src/graphdb/client.py:84
+- BR-021: Neo4j write is idempotent — MERGE on dedup_key; first_seen/company_name/normalized_name set only ON CREATE; verified delta-0 across identical re-runs (see specs/007-neo4j-entity-resolution/quickstart.md). Source: src/graphdb/client.py
 - BR-022: run.py truncates all tables (DELETE FROM) before each write. Source: run.py:65
-- BR-023: Two pipeline paths exist (run.py standalone vs src/pipeline.py via scheduler). They diverge in enrichment, validation, scoring, staging/promotion, and Neo4j write behavior. This is a known architectural debt.
+- BR-023: Two pipeline paths exist (run.py standalone vs src/pipeline.py via scheduler). They diverge in enrichment, validation, scoring, and staging/promotion. Both write to Neo4j. This is a known architectural debt.
+- BR-024: Destructive Neo4j cleanup (MATCH (n) DETACH DELETE n) requires explicit opt-in env var NEO4J_RESET_ALLOWED=1. Source: tests/test_graphdb_idempotency.py, scripts/demo_idempotency.py
 
 NON-GOALS / OUT OF SCOPE (project-wide):
 - No LinkedIn scraping — LinkedIn data enters only via manual CSV import into linkedin_manual tab
@@ -148,10 +142,9 @@ GLOSSARY:
 - "httpx enrichment" = Plain-HTTP fetch of IndiaMART detail pages to extract phones (bypasses browser body retrieval failure)
 
 KNOWN GAPS / UNVERIFIED AREAS:
-- Two divergent pipeline paths (run.py vs src/pipeline.py) — run.py writes to Neo4j but the scheduler/CLI path does not. They also differ in enrichment, validation, scoring, and staging behavior. No single code path does everything.
+- Two divergent pipeline paths (run.py vs src/pipeline.py) — both write to Neo4j, but they differ in enrichment, validation, scoring, and staging behavior. No single code path does everything.
 - External enrichment API contract (specs/001-lead-prospecting-pipeline/contracts/enrichment-api.md) is stale — not in active use by run.py. The pipeline.py path references it but the enrichment/client.py module may not exist.
-- Neo4j SIMILAR_TO relationship is schema-defined but has no population logic yet.
-- Neo4j write is not idempotent across runs — run.py DELETE FROM Leads then re-inserts, but Neo4j MERGE on dedup_key means unchanged records persist across runs (deleted records in SQLite survive in Neo4j).
+- Neo4j write is not fully aligned with SQLite lifecycle — run.py DELETE FROM Leads then re-inserts, but Neo4j MERGE on dedup_key means records removed from SQLite survive in Neo4j (idempotent but not a delete-sync).
 - No monitoring/alerting for any pipeline path — threshold breach only logs to console.
 - LinkedIn manual import tab exists in schema but no ingestion code.
 - Source site HTML structure changes not proactively monitored (each parser is isolated).
@@ -168,8 +161,7 @@ GOVERNANCE:
 - Review Date: 2026-09-01
 - Deprecated Nodes: External Enrichment API contract (stale, not in active use)
 - Pending Changes:
-  - Bridge Neo4j write into src/pipeline.py scheduler path (currently only run.py writes to Neo4j)
   - SIMILAR_TO relationship population logic
-  - Unit tests for src/graphdb/* modules
+  - Delete-sync from SQLite to Neo4j (removed records currently survive in Neo4j)
 
 </PROJECT_KNOWLEDGE_GRAPH>

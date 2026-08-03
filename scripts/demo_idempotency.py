@@ -30,8 +30,19 @@ def snapshot(session) -> dict:
 
 
 def main():
+    import os
+    import sys
+
     from src.graphdb import get_driver, close_driver
     from src.graphdb.client import ensure_schema, write_companies
+
+    # H2 guard: never run MATCH (n) DETACH DELETE n without explicit opt-in.
+    if os.environ.get("NEO4J_RESET_ALLOWED") != "1":
+        sys.exit(
+            "Refusing to run: NEO4J_RESET_ALLOWED not set to '1'. "
+            "This demo executes MATCH (n) DETACH DELETE n against the "
+            "database get_driver() points to."
+        )
 
     driver = get_driver()
     ensure_schema(driver)

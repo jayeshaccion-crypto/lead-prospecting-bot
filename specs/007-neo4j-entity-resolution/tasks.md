@@ -30,7 +30,7 @@ description: "Task list for Neo4j Graph Schema & Entity Resolution"
 
 **Purpose**: Verify the two primary dependencies are present and importable before any code changes.
 
-- [ ] T001 Verify `neo4j>=5.20` and `rapidfuzz>=3.0` are declared in `pyproject.toml` (currently lines 13–14). If either is missing, add it. Then run `pip install -e "."` from repo root and confirm imports succeed: `python -c "import neo4j; import rapidfuzz; print(neo4j.__version__, rapidfuzz.__version__)"`.
+- [x] T001 Verify `neo4j>=5.20` and `rapidfuzz>=3.0` are declared in `pyproject.toml` (currently lines 13–14). If either is missing, add it. Then run `pip install -e "."` from repo root and confirm imports succeed: `python -c "import neo4j; import rapidfuzz; print(neo4j.__version__, rapidfuzz.__version__)"`.
 
 **Checkpoint**: Dependencies present and importable.
 
@@ -42,8 +42,8 @@ description: "Task list for Neo4j Graph Schema & Entity Resolution"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T002 [P] Remove the hardcoded Neo4j password default in `src/graphdb/__init__.py` (line 12): `DEFAULT_PASSWORD = os.environ.get("NEO4J_PASSWORD", "leadsbot")` → `DEFAULT_PASSWORD = os.environ.get("NEO4J_PASSWORD")` (no fallback). In `get_driver()` (`src/graphdb/__init__.py:17`), if `NEO4J_PASSWORD` is unset/empty, `raise RuntimeError("NEO4J_PASSWORD not set — credentials must come from the environment")` BEFORE constructing the driver. `NEO4J_URI`/`NEO4J_USER` may keep their current safe defaults. Constitution Gate G1.
-- [ ] T003 Replace `normalize_company_name` in `src/graphdb/client.py` (lines 25–38) with the exact plan version — add the Indian legal form `opc`, strip punctuation BEFORE suffix stripping, and replace suffixes with a space (not empty string). Exact code:
+- [x] T002 [P] Remove the hardcoded Neo4j password default in `src/graphdb/__init__.py` (line 12): `DEFAULT_PASSWORD = os.environ.get("NEO4J_PASSWORD", "leadsbot")` → `DEFAULT_PASSWORD = os.environ.get("NEO4J_PASSWORD")` (no fallback). In `get_driver()` (`src/graphdb/__init__.py:17`), if `NEO4J_PASSWORD` is unset/empty, `raise RuntimeError("NEO4J_PASSWORD not set — credentials must come from the environment")` BEFORE constructing the driver. `NEO4J_URI`/`NEO4J_USER` may keep their current safe defaults. Constitution Gate G1.
+- [x] T003 Replace `normalize_company_name` in `src/graphdb/client.py` (lines 25–38) with the exact plan version — add the Indian legal form `opc`, strip punctuation BEFORE suffix stripping, and replace suffixes with a space (not empty string). Exact code:
 
 ```python
 import re
@@ -63,7 +63,7 @@ def normalize_company_name(name: str) -> str:
 ```
 
   (Note: `import re` already exists in `src/graphdb/client.py` — do not duplicate it.)
-- [ ] T004 [P] Extend the canonical constraints and indexes in `src/graphdb/schema.py` (CONSTRAINTS list at lines 29–37, INDEXES list at lines 39–42) WITHOUT removing existing entries. Add exactly:
+- [x] T004 [P] Extend the canonical constraints and indexes in `src/graphdb/schema.py` (CONSTRAINTS list at lines 29–37, INDEXES list at lines 39–42) WITHOUT removing existing entries. Add exactly:
 
 ```cypher
 CREATE CONSTRAINT category_name IF NOT EXISTS FOR (cat:Category) REQUIRE cat.name IS UNIQUE
@@ -85,13 +85,13 @@ CREATE INDEX company_normalized_name IF NOT EXISTS FOR (c:Company) ON (c.normali
 
 ### Tests for User Story 1 (tests requested — write FIRST, confirm FAIL, then implement) ⚠️
 
-- [ ] T005 [P] [US1] Create `tests/test_graphdb.py` with the normalization table test: sample ≥30 real company names from `debug_output/{indiamart,justdial,tradeindia}_records.json`, assert `normalize_company_name` output is stable, lowercase, punctuation-free, and that `"Nitai Technologies (OPC) Private Limited"` → `"nitai"`. Assert the 38-name plan sample produces 38 distinct normalized values (no collisions). Reference the expected table in `specs/007-neo4j-entity-resolution/data-model.md` §Normalization sample. **Also add the cross-site phone-keying unit test (C1/C3)**: two records with identical phone but different `company_name` and different `source_url` (one `justdial.com`, one `indiamart.com`) MUST yield the SAME `_dedup_key` (phone last-10 primary — name/site irrelevant), proving phone-keyed matching merges records across sites.
+- [x] T005 [P] [US1] Create `tests/test_graphdb.py` with the normalization table test: sample ≥30 real company names from `debug_output/{indiamart,justdial,tradeindia}_records.json`, assert `normalize_company_name` output is stable, lowercase, punctuation-free, and that `"Nitai Technologies (OPC) Private Limited"` → `"nitai"`. Assert the 38-name plan sample produces 38 distinct normalized values (no collisions). Reference the expected table in `specs/007-neo4j-entity-resolution/data-model.md` §Normalization sample. **Also add the cross-site phone-keying unit test (C1/C3)**: two records with identical phone but different `company_name` and different `source_url` (one `justdial.com`, one `indiamart.com`) MUST yield the SAME `_dedup_key` (phone last-10 primary — name/site irrelevant), proving phone-keyed matching merges records across sites.
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Keep `_dedup_key` in `src/graphdb/client.py` (lines 41–57) UNCHANGED — it already implements the plan §2 identity contract (phone last-10 primary, else `name:<norm>|web:<host>`). Verify it against plan §2 and add a one-line docstring reference if missing.
-- [ ] T007 [US1] Implement the deterministic phone match pass as a `_resolve` helper in `src/graphdb/client.py`, run before any write: if `phone` is present and has ≥10 digits, run the pre-query `MATCH (c:Company) WHERE c.dedup_key = $phone_dk RETURN c.dedup_key AS dk, c.company_name AS name` with `$phone_dk = _dedup_key(company_name, phone)`; if a row returns, resolve to that `dk` with `match_type="phone"`. No fuzzy log entry is generated for a phone match.
-- [ ] T008 [US1] Implement Q3–Q6 MERGE queries in `upsert_company` (`src/graphdb/client.py:85`) using the resolved `dk` from `_resolve`. Run each with parameters and no duplicate writes:
+- [x] T006 [US1] Keep `_dedup_key` in `src/graphdb/client.py` (lines 41–57) UNCHANGED — it already implements the plan §2 identity contract (phone last-10 primary, else `name:<norm>|web:<host>`). Verify it against plan §2 and add a one-line docstring reference if missing.
+- [x] T007 [US1] Implement the deterministic phone match pass as a `_resolve` helper in `src/graphdb/client.py`, run before any write: if `phone` is present and has ≥10 digits, run the pre-query `MATCH (c:Company) WHERE c.dedup_key = $phone_dk RETURN c.dedup_key AS dk, c.company_name AS name` with `$phone_dk = _dedup_key(company_name, phone)`; if a row returns, resolve to that `dk` with `match_type="phone"`. No fuzzy log entry is generated for a phone match.
+- [x] T008 [US1] Implement Q3–Q6 MERGE queries in `upsert_company` (`src/graphdb/client.py:85`) using the resolved `dk` from `_resolve`. Run each with parameters and no duplicate writes:
 
 ```cypher
 MERGE (c:Company {dedup_key: $dk})
@@ -129,7 +129,8 @@ SET r.scraped_at = $now, r.raw_record_id = $raw_record_id
 ```
 
   Params: `sources = [src_name]` if a source is known else `[]` (create path); `src_name` = `None` on create so the append branch is inert; `now` = run date ISO. `first_seen` MUST only ever be set in `ON CREATE` (FR-008). Keep `lead_score`/`lead_score_breakdown` as Company properties on create (data-layer isolation).
-- [ ] T009 [US1] Thread `raw_record_id` + `source_name` into the row dicts in `_write_to_neo4j` (`src/pipeline.py:350-363`). Add `"source_name": ...` (reuse `src/graphdb.client._source_name(source_url)`) and `"raw_record_id": f"{source_name}|{company_name}|{primary_contact}".lower()` where `primary_contact` = phone digits if present, else email, else website (whitespace collapsed) — deterministic and stable across identical re-runs. Pass both through to `write_companies`/`upsert_company`.
+  **Review fix M1**: `company_name`/`normalized_name` are set **ON CREATE only** (never `ON MATCH`) so a merged node's canonical display name is first-seen, not last-write-wins.
+- [x] T009 [US1] **Review fix M3**: `raw_record_id` is NOT threaded from the pipeline — the writer owns it. `src/pipeline.py` `_write_to_neo4j` passes only the record fields; `src/graphdb/client.py` generates `f"{source_name}|{company_name}|{primary_contact}".lower()` with `primary_contact` = phone digits if present, else email, else website (whitespace collapsed) — deterministic, stable across identical re-runs, and format-owned in one place. A `source_url` that maps to no known directory yields `source_name = None` (M6): no append to `sources`, no `SOURCED_FROM` edge.
 
 **Checkpoint**: At this point, User Story 1 is fully functional and testable independently — same-phone records from different sources resolve to one Company node with an accumulating `sources` list.
 
@@ -143,12 +144,12 @@ SET r.scraped_at = $now, r.raw_record_id = $raw_record_id
 
 ### Tests for User Story 2 (tests requested — write FIRST, confirm FAIL) ⚠️
 
-- [ ] T010 [P] [US2] In `tests/test_config.py` add tests for `get_fuzzy_match_threshold()`: default is `90` when `fuzzy_match_threshold` is absent; reads the int when present in the config dict; falls back to `90` on a non-numeric value.
+- [x] T010 [P] [US2] In `tests/test_config.py` add tests for `get_fuzzy_match_threshold()`: default is `90` when `fuzzy_match_threshold` is absent; reads the int when present in the config dict; falls back to `90` on a non-numeric value.
 
 ### Implementation for User Story 2
 
-- [ ] T011 [P] [US2] Add `get_fuzzy_match_threshold(config=None)` to `src/config.py` (after `load_full_config` at line 37): `config = load_full_config()` if `None`, return `config.get("fuzzy_match_threshold", 90)` coerced to `int`, else `90` on `TypeError`/`ValueError`. Add `fuzzy_match_threshold: 90` as a top-level key in `config/targets.yaml`.
-- [ ] T012 [P] [US2] Replace `_write_fuzzy_review` in `src/graphdb/client.py` (lines 69–77) with the exact review-log writer. Signature: `_write_fuzzy_review(incoming, incoming_norm, candidate, candidate_norm, score, threshold, verdict)`. Append one pipe-separated line to `debug_output/fuzzy_matches.log` (create dir, never truncate; write the header line once when the file is created). Exact schema:
+- [x] T011 [P] [US2] Add `get_fuzzy_match_threshold(config=None)` to `src/config.py` (after `load_full_config` at line 37): `config = load_full_config()` if `None`, return `config.get("fuzzy_match_threshold", 90)` coerced to `int`, else `90` on `TypeError`/`ValueError`. Add `fuzzy_match_threshold: 90` as a top-level key in `config/targets.yaml`.
+- [x] T012 [P] [US2] Replace `_write_fuzzy_review` in `src/graphdb/client.py` (lines 69–77) with the exact review-log writer. Signature: `_write_fuzzy_review(incoming, incoming_norm, candidate, candidate_norm, score, threshold, verdict)`. Append one pipe-separated line to `debug_output/fuzzy_matches.log` (create dir, never truncate; write the header line once when the file is created). Exact schema:
 
 ```text
 timestamp|action|incoming_name|incoming_normalized|candidate_name|candidate_normalized|score|threshold|verdict
@@ -156,7 +157,7 @@ timestamp|action|incoming_name|incoming_normalized|candidate_name|candidate_norm
 ```
 
   - `timestamp`: ISO 8601 UTC (`datetime.now(timezone.utc).isoformat()`); `action` always `FUZZY_MATCH`; `score`: `token_sort_ratio` rounded to 1 decimal; `threshold`: in-effect int; `verdict`: `matched` | `not_matched`. Escape `|` inside names if any. On `OSError`, log a warning and surface the failure (never silently drop).
-- [ ] T013 [US2] Implement the fuzzy pass in `_resolve` (`src/graphdb/client.py`) — runs ONLY when the phone pass found no match (FR-005). Scope candidates via index-backed prefix query `MATCH (c:Company) WHERE c.normalized_name STARTS WITH $prefix RETURN c.dedup_key AS dk, c.company_name AS name, c.normalized_name AS norm` with `prefix = norm[:3] if len(norm) >= 3 else norm`. For each candidate compute `score = float(fuzz.token_sort_ratio(norm, cand_norm))` and ALWAYS call `_write_fuzzy_review(...)` (verdict `matched` if `score >= threshold` else `not_matched`). Track best candidate: highest score; on a score tie, lexicographically smallest `company_name`. If best ≥ threshold, resolve with `match_type="fuzzy"` and `fuzzy_score`. Else resolve as new with `match_type=None`. Threshold comes from `get_fuzzy_match_threshold()` and must be threaded from `write_companies`.
+- [x] T013 [US2] Implement the fuzzy pass in `_resolve` (`src/graphdb/client.py`) — runs ONLY when the phone pass found no match (FR-005). Scope candidates via index-backed prefix query `MATCH (c:Company) WHERE c.normalized_name STARTS WITH $prefix RETURN c.dedup_key AS dk, c.company_name AS name, c.normalized_name AS norm` with `prefix = norm[:3] if len(norm) >= 3 else norm`. For each candidate compute `score = float(fuzz.token_sort_ratio(fuzzy_normalize_company_name(incoming), fuzzy_normalize_company_name(candidate)))` — **legal-suffix-only normalization (H1)**, NOT the display normalization, so descriptor-word differences (Solutions vs Services) never fuse — and ALWAYS call `_write_fuzzy_review(...)` (verdict `matched` if `score >= threshold` else `not_matched`). Track best candidate: highest score; on a score tie, lexicographically smallest `company_name`. If best ≥ threshold, resolve with `match_type="fuzzy"` and `fuzzy_score`. Else resolve as new with `match_type=None`. Threshold comes from `get_fuzzy_match_threshold()` and must be threaded from `write_companies`.
 
 **Checkpoint**: User Stories 1 AND 2 both work independently — full resolution pipeline with auditable review trail.
 
@@ -170,8 +171,8 @@ timestamp|action|incoming_name|incoming_normalized|candidate_name|candidate_norm
 
 ### Tests for User Story 3 (tests requested — write FIRST, confirm FAIL) ⚠️
 
-- [ ] T014 [P] [US3] Create `scripts/make_graphdb_fixture.py` that reads `debug_output/{indiamart,justdial,tradeindia}_records.json` (28+10+13 = 51 records), augments each with `city_slug`/`category_slug` from crawl context and deterministic `lead_score`/`lead_score_breakdown`, and writes the committed fixture `tests/fixtures/graphdb_batch.json`. **MANDATORY (cross-site phone-merge coverage, C1/C2)**: the real captures contain ZERO cross-record phone matches and no TradeIndia phone/email — the fixture MUST therefore add synthetic records so phone-keyed cross-site merging is actually exercised: (a) one JustDial listing + one IndiaMART listing for the SAME real company with identical phone but different `company_name`/`source_url` (assert this pair shares a phone-last-10 group), (b) one TradeIndia record carrying phone+email (proves Phase 4 enrichment data feeds the phone pass). Assert before writing: ≥1 phone-last-10 group contains records from ≥2 distinct sites. Run it once and check in the generated fixture (the test never re-derives it).
-- [ ] T015 [US3] Create `tests/test_graphdb_idempotency.py` marked `@pytest.mark.integration`, `pytest.skip` when `NEO4J_URI`/`NEO4J_PASSWORD` env is unset or connectivity fails. Procedure: (1) `MATCH (n) DETACH DELETE n` on the test DB; (2) `write_companies(driver, BATCH)`; (3) snapshot counts with the exact count queries; (4) run `write_companies(driver, BATCH)` again; (5) re-run the same queries and assert every value equals the Run-1 snapshot (delta 0). Exact count queries:
+- [x] T014 [P] [US3] Create `scripts/make_graphdb_fixture.py` that reads `debug_output/{indiamart,justdial,tradeindia}_records.json` (28+10+13 = 51 records), augments each with `city_slug`/`category_slug` from crawl context and deterministic `lead_score`/`lead_score_breakdown`, and writes the committed fixture `tests/fixtures/graphdb_batch.json`. **MANDATORY (cross-site phone-merge coverage, C1/C2)**: the real captures contain ZERO cross-record phone matches and no TradeIndia phone/email — the fixture MUST therefore add synthetic records so phone-keyed cross-site merging is actually exercised: (a) one JustDial listing + one IndiaMART listing for the SAME real company with identical phone but different `company_name`/`source_url` (assert this pair shares a phone-last-10 group), (b) one TradeIndia record carrying phone+email (proves Phase 4 enrichment data feeds the phone pass). Assert before writing: ≥1 phone-last-10 group contains records from ≥2 distinct sites. Run it once and check in the generated fixture (the test never re-derives it).
+- [x] T015 [US3] Create `tests/test_graphdb_idempotency.py` marked `@pytest.mark.integration`, `pytest.skip` when `NEO4J_URI`/`NEO4J_PASSWORD` env is unset or connectivity fails. Procedure: (1) `MATCH (n) DETACH DELETE n` on the test DB; (2) `write_companies(driver, BATCH)`; (3) snapshot counts with the exact count queries; (4) run `write_companies(driver, BATCH)` again; (5) re-run the same queries and assert every value equals the Run-1 snapshot (delta 0). Exact count queries:
 
 ```cypher
 MATCH (c:Company) RETURN count(c) AS companies
@@ -188,7 +189,7 @@ MATCH ()-[r:SOURCED_FROM]->() RETURN count(r) AS sourced_from
 
 ### Implementation for User Story 3
 
-- [ ] T016 [US3] Run the idempotency test against a live Neo4j and record the results in `specs/007-neo4j-entity-resolution/quickstart.md` §Idempotency: the two snapshots (table of the 7 counts, Run1 vs Run2), delta = 0 for all seven, and the review-log note (log grew, counts did not). If no Neo4j is reachable, document the skip + the exact command to run it later (`NEO4J_URI=... NEO4J_PASSWORD=... python -m pytest tests/test_graphdb_idempotency.py -m integration -v`).
+- [x] T016 [US3] Run the idempotency test against a live Neo4j and record the results in `specs/007-neo4j-entity-resolution/quickstart.md` §Idempotency: the two snapshots (table of the 7 counts, Run1 vs Run2), delta = 0 for all seven, and the review-log note (log grew, counts did not). If no Neo4j is reachable, document the skip + the exact command to run it later (`NEO4J_URI=... NEO4J_PASSWORD=... python -m pytest tests/test_graphdb_idempotency.py -m integration -v`).
 
 **Checkpoint**: All user stories independently functional — re-runs provably idempotent.
 
@@ -198,8 +199,8 @@ MATCH ()-[r:SOURCED_FROM]->() RETURN count(r) AS sourced_from
 
 **Purpose**: Improvements that affect multiple user stories (FR-010 / SC-005 reporting; constitution verification).
 
-- [ ] T017 End-of-run graph-size + match-type reporting. In `src/graphdb/client.py` ensure `write_companies` (line 245) returns `created`, `merged_phone`, `merged_fuzzy`, `skipped`; extend it to also log total graph size using `get_stats` (line 317) — Company/Category/City/Source counts + LISTED_IN/LOCATED_IN/SOURCED_FROM counts. In `src/pipeline.py` `main_pipeline` (lines 439–471) log the full match-type breakdown plus total graph size and keep `summary["neo4j_failed"]` (Constitution G4 — a failed run must never look like a 0-count success). Per FR-010/SC-005.
-- [ ] T018 Run the full suite from repo root: `python -m pytest -q` (integration tests stay skipped without live Neo4j). Verify constitution gates: `git grep -iE "password|secret|NEO4J_.*leadsbot" -- ":!*.log"` returns only env-loading references (no committed credentials); spot-check `debug_output/fuzzy_matches.log` lines match the exact review-log schema; confirm `lead_score`/`lead_score_breakdown` appear only on the data-layer Company node.
+- [x] T017 End-of-run graph-size + match-type reporting. In `src/graphdb/client.py` ensure `write_companies` (line 245) returns `created`, `merged_phone`, `merged_fuzzy` and logs total graph size using `get_stats` (line 317) — Company/Category/City/Source counts + LISTED_IN/LOCATED_IN/SOURCED_FROM counts. (Review fix L1: the `skipped` stat and unreachable `merged_phone` else-branch were removed — every record is created or merged.) In `src/pipeline.py` `main_pipeline` (lines 439–471) log the full match-type breakdown plus total graph size and keep `summary["neo4j_failed"]` (Constitution G4 — a failed run must never look like a 0-count success). Per FR-010/SC-005.
+- [x] T018 Run the full suite from repo root: `python -m pytest -q` (integration tests stay skipped without live Neo4j). Verify constitution gates: `git grep -iE "password|secret|NEO4J_.*leadsbot" -- ":!*.log"` returns only env-loading references (no committed credentials); spot-check `debug_output/fuzzy_matches.log` lines match the exact review-log schema; confirm `lead_score`/`lead_score_breakdown` appear only on the data-layer Company node.
 
 **Checkpoint**: Full suite green; gates verified; feature complete.
 

@@ -8,22 +8,15 @@ logger = logging.getLogger(__name__)
 
 LABELS = {
     "Company": "Company",
-    "Phone": "Phone",
-    "Email": "Email",
-    "Website": "Website",
-    "Location": "Location",
-    "Industry": "Industry",
+    "Category": "Category",
+    "City": "City",
     "Source": "Source",
 }
 
 REL_TYPES = {
-    "HAS_PHONE": "HAS_PHONE",
-    "HAS_EMAIL": "HAS_EMAIL",
-    "HAS_WEBSITE": "HAS_WEBSITE",
+    "LISTED_IN": "LISTED_IN",
     "LOCATED_IN": "LOCATED_IN",
-    "BELONGS_TO": "BELONGS_TO",
     "SOURCED_FROM": "SOURCED_FROM",
-    "SIMILAR_TO": "SIMILAR_TO",
 }
 
 CONSTRAINTS = [

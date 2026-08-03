@@ -1,7 +1,7 @@
 # Contract: Fuzzy-Match Review Log Format
 
 **Feature**: Neo4j Graph Schema & Entity Resolution
-**Version**: 1.0 | **Date**: 2026-08-03
+**Version**: 1.1 | **Date**: 2026-08-03
 **Consumers**: `src/graphdb/client.py:_write_fuzzy_review` (writer), operators (manual spot-check), tests.
 
 ## Location
@@ -37,7 +37,8 @@ A header line with the same field names is written when the file is first create
 
 - **Every** fuzzy comparison is written — above and below threshold (below-threshold comparisons must not vanish without trace, Constitution §Entity Resolution Transparency).
 - Phone-keyed merges are **not** written to this file (they are logged at INFO level instead).
-- Names are written verbatim; the fields are pipe-separated, so a name containing `|` is escaped as `\|`.
+- Names are written verbatim; the fields are pipe-separated, so a name containing `|` is escaped as `\|` (L3).
+- Appends are serialized under an advisory lock (`fuzzy_matches.log.lock`, cross-process best-effort) so concurrent writers never interleave lines or duplicate the header (L3).
 
 ## Example
 

@@ -50,6 +50,15 @@ def _require_live_neo4j():
         pytest.skip(f"Neo4j unreachable: {exc}")
 
 
+def _require_reset_opt_in():
+    """H2 guard: never run MATCH (n) DETACH DELETE n without explicit opt-in."""
+    if os.environ.get("NEO4J_RESET_ALLOWED") != "1":
+        pytest.skip(
+            "NEO4J_RESET_ALLOWED not set to '1' — refusing to DETACH DELETE n "
+            "against the database get_driver() points to"
+        )
+
+
 pytestmark = pytest.mark.integration
 
 
@@ -62,6 +71,7 @@ def test_idempotent_two_run_counts():
     ensure_schema(driver)
     batch = _batch()
 
+    _require_reset_opt_in()
     with driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
 

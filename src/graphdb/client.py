@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import sys
+import threading
 import unicodedata
 from datetime import datetime, timezone
 from hashlib import md5
@@ -40,6 +42,30 @@ def normalize_company_name(name: str) -> str:
     return n
 
 
+# Legal suffixes ONLY — business-descriptor words (solutions/services/technologies,
+# etc.) are intentionally NOT stripped here so genuinely distinct companies that
+# differ only by a descriptor are not fused by over-normalization (H1).
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(pvt|ltd|llp|private\s*limited|opc|inc|corp|corporation|llc|limited|co|company)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def fuzzy_normalize_company_name(name: str) -> str:
+    """Normalize a name for fuzzy comparison: strip ONLY legal/corporate suffixes.
+
+    Unlike :func:`normalize_company_name`, descriptor words such as solutions,
+    services, technologies, systems, group, industries, enterprises are KEPT.
+    Two genuinely different companies like 'Pinnacle It Solutions' and
+    'Pinnacle It Services' therefore score well below threshold and do not merge.
+    """
+    n = name.lower().strip()
+    n = re.sub(r"[^\w\s]", " ", n)
+    n = _LEGAL_SUFFIX_RE.sub(" ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
 def _dedup_key(company_name: str, phone: str | None = None, website: str | None = None) -> str:
     """Generate a deterministic dedup key.
 
@@ -59,17 +85,61 @@ def _dedup_key(company_name: str, phone: str | None = None, website: str | None 
     return md5(raw.encode()).hexdigest()
 
 
-def _source_name(url: str | None) -> str:
+def source_name(url: str | None) -> str | None:
+    """Return the canonical directory name for a source URL, or None if unknown.
+
+    This is the single source of truth for URL → directory-name mapping (M4).
+    Returning None (not a sentinel string) is what keeps unknown sources from
+    ever being appended to a node's ``sources`` list or creating a SOURCED_FROM
+    edge (M6).
+    """
     if not url:
-        return "Unknown"
+        return None
     for domain, name in SITE_SOURCES.items():
         if domain in url:
             return name
-    return "Unknown"
+    return None
 
 
 def ensure_schema(driver: GraphDatabase.driver):
     create_schema(driver)
+
+
+_REVIEW_LOG_LOCK = threading.Lock()
+
+
+def _escape_pipe(value: str) -> str:
+    """Escape pipe separators as ``\\|`` per review-log-format.md contract (L3)."""
+    return (value or "").replace("|", "\\|")
+
+
+def _locked_append(path: str, text: str):
+    """Append ``text`` to ``path`` under an advisory lock (in-process + best-effort cross-process).
+
+    If the OS lock mechanism is unavailable (e.g. an exotic platform), falls
+    back to a plain append. A genuine write error still propagates as OSError
+    so callers can warn — the review log must never silently vanish (L3).
+    """
+    with _REVIEW_LOG_LOCK:
+        lock_path = path + ".lock"
+        try:
+            with open(lock_path, "ab") as lf:
+                if sys.platform == "win32":
+                    import msvcrt
+                    lf.seek(0)
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(text)
+                    f.flush()
+        except (OSError, ImportError):
+            # Lock unavailable/unsupported — plain append still works; the
+            # final write can still raise OSError, which callers handle.
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
 
 
 def _write_fuzzy_review(
@@ -86,6 +156,7 @@ def _write_fuzzy_review(
     Every fuzzy comparison is logged (matched or not). Format:
     timestamp|action|incoming_name|incoming_normalized|candidate_name|
     candidate_normalized|score|threshold|verdict
+    A literal ``|`` inside a name is escaped as ``\\|`` (L3).
     """
     log_dir = "debug_output"
     path = os.path.join(log_dir, "fuzzy_matches.log")
@@ -95,21 +166,21 @@ def _write_fuzzy_review(
         ts = datetime.now(timezone.utc).isoformat()
         line = "|".join([
             ts, "FUZZY_MATCH",
-            (incoming or "").replace("|", " "),
-            (incoming_norm or "").replace("|", " "),
-            (candidate or "").replace("|", " "),
-            (candidate_norm or "").replace("|", " "),
+            _escape_pipe(incoming),
+            _escape_pipe(incoming_norm),
+            _escape_pipe(candidate),
+            _escape_pipe(candidate_norm),
             f"{float(score):.1f}",
             str(int(threshold)),
             verdict,
         ])
-        with open(path, "a", encoding="utf-8") as f:
-            if is_new:
-                f.write(
-                    "timestamp|action|incoming_name|incoming_normalized|"
-                    "candidate_name|candidate_normalized|score|threshold|verdict\n"
-                )
-            f.write(line + "\n")
+        if is_new:
+            _locked_append(
+                path,
+                "timestamp|action|incoming_name|incoming_normalized|"
+                "candidate_name|candidate_normalized|score|threshold|verdict\n",
+            )
+        _locked_append(path, line + "\n")
     except OSError:
         logger.warning("Could not write fuzzy-match review log (falling back to console-only)")
 
@@ -138,8 +209,6 @@ ON CREATE SET
   c.lead_score_breakdown = $breakdown,
   c.sources = $sources
 ON MATCH SET
-  c.company_name = $name,
-  c.normalized_name = $norm,
   c.phone = CASE WHEN $phone IS NOT NULL AND $phone <> '' THEN $phone ELSE c.phone END,
   c.email = CASE WHEN $email IS NOT NULL AND $email <> '' THEN $email ELSE c.email END,
   c.website = CASE WHEN $website IS NOT NULL AND $website <> '' THEN $website ELSE c.website END,
@@ -172,8 +241,8 @@ Q6_SOURCED_FROM = (
 )
 
 
-def _resolve(session, record: dict, norm: str, threshold: int) -> dict:
-    """Run entity resolution for one record.
+def _resolve(tx, record: dict, norm: str, threshold: int) -> dict:
+    """Run entity resolution for one record against a session or transaction.
 
     Returns a dict: dk (the identity key to write under), match_type
     ('phone'|'fuzzy'|None), matched_name (optional), fuzzy_score (optional).
@@ -184,25 +253,29 @@ def _resolve(session, record: dict, norm: str, threshold: int) -> dict:
     if phone:
         digits = re.sub(r"\D", "", phone)
         if len(digits) >= 10:
-            row = session.run(Q1_PHONE_MATCH, {"phone_dk": _dedup_key(record["company_name"], phone)}).single()
+            row = tx.run(Q1_PHONE_MATCH, {"phone_dk": _dedup_key(record["company_name"], phone)}).single()
             if row:
                 return {"dk": row["dk"], "match_type": "phone", "matched_name": row["name"]}
 
     # 2. Fuzzy name pass (only when no phone match)
     prefix = norm[:3] if len(norm) >= 3 else norm
+    fuzzy_incoming = fuzzy_normalize_company_name(record["company_name"])
     best = None  # (score, candidate_name, dk)
-    for row in session.run(Q2_FUZZY_SCAN, {"prefix": prefix}):
-        cand_norm = row["norm"] or normalize_company_name(row["name"] or "")
-        score = float(fuzz.token_sort_ratio(norm, cand_norm))
+    for row in tx.run(Q2_FUZZY_SCAN, {"prefix": prefix}):
+        cand_name = row["name"] or ""
+        cand_norm = row["norm"] or normalize_company_name(cand_name)
+        # Score on legal-suffix-only normalization (H1) so descriptor-word
+        # differences (Solutions vs Services) are not erased.
+        score = float(fuzz.token_sort_ratio(fuzzy_incoming, fuzzy_normalize_company_name(cand_name)))
         verdict = "matched" if score >= float(threshold) else "not_matched"
         _write_fuzzy_review(
             incoming=record["company_name"], incoming_norm=norm,
-            candidate=row["name"] or "", candidate_norm=cand_norm,
+            candidate=cand_name, candidate_norm=cand_norm,
             score=score, threshold=threshold, verdict=verdict,
         )
         if score >= float(threshold):
-            if best is None or score > best[0] or (score == best[0] and (row["name"] or "") < best[1]):
-                best = (score, row["name"] or "", row["dk"])
+            if best is None or score > best[0] or (score == best[0] and (cand_name or "") < best[1]):
+                best = (score, cand_name, row["dk"])
     if best:
         logger.info(
             "Entity resolution: fuzzy match '%s' -> '%s' (score=%.1f)",
@@ -212,18 +285,11 @@ def _resolve(session, record: dict, norm: str, threshold: int) -> dict:
     return {"dk": _dedup_key(record["company_name"], phone, record.get("website")), "match_type": None}
 
 
-def upsert_company(driver: GraphDatabase.driver, record: dict, threshold: int = 90) -> dict:
-    """MERGE a Company node with entity resolution, return the operation result.
+def _upsert_company_in_tx(tx, record: dict, threshold: int) -> dict:
+    """Run entity resolution + all four write queries inside one transaction.
 
-    Entity resolution:
-    1. Deterministic phone match (last 10 digits) — phone is the primary key.
-    2. If no phone match, fuzzy name match on token_sort_ratio >= threshold;
-       every comparison is written to the review log.
-    3. On match: MERGE the existing node (sources appended, last_seen updated).
-    4. On no match: MERGE creates a new node with first_seen set once.
-
-    Returns dict with keys: action (created/merged/skipped), dedup_key,
-    match_type (phone/fuzzy/none), matched_name (if any), fuzzy_score (if any).
+    Q3–Q6 run in a single Neo4j transaction (L6) so a partial failure rolls
+    back the whole record instead of leaving a half-merged node.
     """
     company_name = (record.get("company_name") or "").strip() or "Unknown"
     phone = (record.get("phone") or "").strip() or None
@@ -237,36 +303,38 @@ def upsert_company(driver: GraphDatabase.driver, record: dict, threshold: int = 
     lead_score = record.get("lead_score")
     lead_score_breakdown = record.get("lead_score_breakdown")
     normalized_name = normalize_company_name(company_name)
-    src_name = _source_name(source_url)
+    src_name = source_name(source_url)
     now_str = datetime.now(timezone.utc).isoformat()
-    raw_record_id = record.get("raw_record_id")
 
-    with driver.session() as session:
-        resolved = _resolve(session, record, normalized_name, threshold)
-        dk = resolved["dk"]
-        match_type = resolved["match_type"]
+    resolved = _resolve(tx, record, normalized_name, threshold)
+    dk = resolved["dk"]
+    match_type = resolved["match_type"]
 
-        sources = [src_name] if src_name != "Unknown" else []
-        session.run(
-            Q3_MERGE_COMPANY,
-            {"dk": dk, "name": company_name, "norm": normalized_name,
-             "phone": phone, "email": email, "website": website,
-             "address": address, "industry_code": industry_code,
-             "now": now_str, "sources": sources, "src_name": src_name,
-             "score": lead_score,
-             "breakdown": json.dumps(lead_score_breakdown) if lead_score_breakdown else None},
+    sources = [src_name] if src_name else []
+    tx.run(
+        Q3_MERGE_COMPANY,
+        {"dk": dk, "name": company_name, "norm": normalized_name,
+         "phone": phone, "email": email, "website": website,
+         "address": address, "industry_code": industry_code,
+         "now": now_str, "sources": sources, "src_name": src_name,
+         "score": lead_score,
+         "breakdown": json.dumps(lead_score_breakdown) if lead_score_breakdown else None},
+    )
+
+    if category_slug:
+        tx.run(Q4_LISTED_IN, {"dk": dk, "category": category_slug})
+    if city_slug:
+        tx.run(Q5_LOCATED_IN, {"dk": dk, "city": city_slug})
+    if src_name:
+        # M3: raw_record_id is generated here (phone digits only) so the
+        # contract format is owned in one place, never raw with spaces/+.
+        primary = _primary_contact(phone, email, website)
+        raw_record_id = f"{src_name}|{company_name}|{primary}".lower()
+        tx.run(
+            Q6_SOURCED_FROM,
+            {"dk": dk, "source": src_name, "now": now_str,
+             "raw_record_id": raw_record_id},
         )
-
-        if category_slug:
-            session.run(Q4_LISTED_IN, {"dk": dk, "category": category_slug})
-        if city_slug:
-            session.run(Q5_LOCATED_IN, {"dk": dk, "city": city_slug})
-        if src_name != "Unknown":
-            session.run(
-                Q6_SOURCED_FROM,
-                {"dk": dk, "source": src_name, "now": now_str,
-                 "raw_record_id": raw_record_id or f"{src_name}|{company_name}|{_primary_contact(phone, email, website)}".lower()},
-            )
 
     result = {"dedup_key": dk, "action": "merged" if match_type else "created", "match_type": match_type}
     if resolved.get("matched_name"):
@@ -276,8 +344,28 @@ def upsert_company(driver: GraphDatabase.driver, record: dict, threshold: int = 
     return result
 
 
+def upsert_company(driver: GraphDatabase.driver, record: dict, threshold: int = 90) -> dict:
+    """MERGE a Company node with entity resolution, return the operation result.
+
+    Entity resolution:
+    1. Deterministic phone match (last 10 digits) — phone is the primary key.
+    2. If no phone match, fuzzy name match on token_sort_ratio >= threshold;
+       every comparison is written to the review log.
+    3. On match: MERGE the existing node (sources appended, last_seen updated).
+    4. On no match: MERGE creates a new node with first_seen set once.
+
+    Returns dict with keys: action (created/merged), dedup_key,
+    match_type (phone/fuzzy/none), matched_name (if any), fuzzy_score (if any).
+    """
+    with driver.session() as session:
+        return session.execute_write(_upsert_company_in_tx, record, threshold)
+
+
 def _primary_contact(phone: str | None, email: str | None, website: str | None) -> str:
-    """Return the primary contact for raw_record_id (phone > email > website)."""
+    """Return the primary contact for raw_record_id (phone > email > website).
+
+    Phone is reduced to digits per contract (graph-schema.md §Relationship).
+    """
     if phone:
         digits = re.sub(r"\D", "", phone)
         if digits:
@@ -292,23 +380,22 @@ def _primary_contact(phone: str | None, email: str | None, website: str | None) 
 def write_companies(driver: GraphDatabase.driver, records: list[dict], threshold: int = 90) -> dict:
     """Write multiple records to Neo4j with entity resolution.
 
-    Returns aggregate stats: created, merged (phone vs fuzzy), skipped, and
-    total graph size (node + relationship counts).
+    A single Neo4j session is reused across all records (L2); each record's
+    writes are committed atomically in its own transaction (L6).
+
+    Returns aggregate stats: created, merged (phone vs fuzzy), and total graph
+    size (node + relationship counts).
     """
-    stats = {"created": 0, "merged_phone": 0, "merged_fuzzy": 0, "skipped": 0}
-    for rec in records:
-        r = upsert_company(driver, rec, threshold=threshold)
-        if r["action"] == "created":
-            stats["created"] += 1
-        elif r["action"] == "merged":
-            if r.get("match_type") == "phone":
+    stats = {"created": 0, "merged_phone": 0, "merged_fuzzy": 0}
+    with driver.session() as session:
+        for rec in records:
+            r = session.execute_write(_upsert_company_in_tx, rec, threshold)
+            if r["action"] == "created":
+                stats["created"] += 1
+            elif r.get("match_type") == "phone":
                 stats["merged_phone"] += 1
             elif r.get("match_type") == "fuzzy":
                 stats["merged_fuzzy"] += 1
-            else:
-                stats["merged_phone"] += 1
-        else:
-            stats["skipped"] += 1
     stats["graph"] = get_stats(driver)
     return stats
 

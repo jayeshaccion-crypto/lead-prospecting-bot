@@ -279,26 +279,11 @@ def run_summary(
     }
 
 
-SITE_SOURCE_NAMES: dict[str, str] = {
-    "justdial.com": "Justdial",
-    "indiamart.com": "IndiaMART",
-    "tradeindia.com": "TradeIndia",
-}
-
-
-def _source_name(source_url: str | None) -> str | None:
-    if not source_url:
-        return None
-    for domain, name in SITE_SOURCE_NAMES.items():
-        if domain in source_url:
-            return name
-    return None
-
-
 def raw_record_to_lead(record) -> "LeadRecord":
     """Convert a RawRecord to a LeadRecord with computed dedup_key and timestamp."""
     from urllib.parse import urlparse
 
+    from src.graphdb.client import source_name
     from src.models import LeadRecord, now_utc
 
     existing_dedup = getattr(record, "dedup_key", None) or ""
@@ -318,7 +303,7 @@ def raw_record_to_lead(record) -> "LeadRecord":
     cat_slug = getattr(record, "category_slug", None) or ""
     city_slug = getattr(record, "city_slug", None) or ""
     now = now_utc()
-    src_name = _source_name(record.source_url)
+    src_name = source_name(record.source_url)
 
     return LeadRecord.model_construct(
         company_name=record.company_name,
@@ -342,34 +327,32 @@ def raw_record_to_lead(record) -> "LeadRecord":
 def _write_to_neo4j(records: list[LeadRecord]) -> dict:
     """Write valid records to Neo4j with entity resolution. Returns stats."""
     try:
-        from src.graphdb.client import ensure_schema, write_companies, _source_name
+        from src.graphdb.client import ensure_schema, write_companies, source_name
         from src.graphdb import get_driver, close_driver
         from src.config import get_fuzzy_match_threshold
         threshold = get_fuzzy_match_threshold()
         driver = get_driver()
-        ensure_schema(driver)
-        row_dicts = []
-        for r in records:
-            src_name = _source_name(r.source_url)
-            primary_contact = r.phone or r.email or r.website or ""
-            row_dicts.append({
-                "company_name": r.company_name,
-                "website": r.website,
-                "email": r.email,
-                "phone": r.phone,
-                "address": r.address,
-                "industry_code": r.industry_code,
-                "source_url": r.source_url,
-                "source_name": src_name,
-                "raw_record_id": f"{src_name}|{r.company_name}|{primary_contact}".lower(),
-                "city_slug": r.city_slug,
-                "category_slug": r.category_slug,
-                "lead_score": r.lead_score,
-                "lead_score_breakdown": r.lead_score_breakdown,
-            })
-        stats = write_companies(driver, row_dicts, threshold=threshold)
-        close_driver()
-        return stats
+        try:
+            ensure_schema(driver)
+            row_dicts = []
+            for r in records:
+                row_dicts.append({
+                    "company_name": r.company_name,
+                    "website": r.website,
+                    "email": r.email,
+                    "phone": r.phone,
+                    "address": r.address,
+                    "industry_code": r.industry_code,
+                    "source_url": r.source_url,
+                    "city_slug": r.city_slug,
+                    "category_slug": r.category_slug,
+                    "lead_score": r.lead_score,
+                    "lead_score_breakdown": r.lead_score_breakdown,
+                })
+            return write_companies(driver, row_dicts, threshold=threshold)
+        finally:
+            # L7: always release the driver, including on write failure.
+            close_driver()
     except ImportError as exc:
         logger.error("Neo4j driver not installed: %s", exc)
         raise
